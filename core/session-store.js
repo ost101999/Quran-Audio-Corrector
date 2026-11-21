@@ -2,10 +2,14 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const SESSIONS_ROOT_DIR = path.join(os.homedir(), '.quran-audio-corrector', 'sessions');
+const WIN_Z_STORAGE_DIR = 'Z:\\تسجيلات الطلبة الصوتية\\المصحح الصوتي';
+const HAS_WIN_Z_STORAGE = process.platform === 'win32' && fs.existsSync('Z:\\تسجيلات الطلبة الصوتية');
+const SESSIONS_ROOT_DIR = HAS_WIN_Z_STORAGE
+    ? path.join(WIN_Z_STORAGE_DIR, 'sessions')
+    : path.join(os.homedir(), '.quran-audio-corrector', 'sessions');
 const HUD_STATE_PATH = path.join(os.homedir(), '.quran-audio-corrector', 'hud-state.json');
-const OUTPUT_HTML_DIR = process.platform === 'win32'
-    ? path.join(os.homedir(), 'Documents', 'المصحح الصوتي')
+const OUTPUT_HTML_DIR = HAS_WIN_Z_STORAGE
+    ? WIN_Z_STORAGE_DIR
     : path.join(os.homedir(), 'Documents', 'المصحح الصوتي');
 
 function loadHudState(statePath = HUD_STATE_PATH) {
