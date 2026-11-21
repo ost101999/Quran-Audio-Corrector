@@ -1,0 +1,48 @@
+{
+  "name": "quran-audio-corrector",
+  "private": true,
+  "version": "1.0.0",
+  "type": "commonjs",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node start.js --dev",
+    "build": "vite build",
+    "start": "node start.js",
+    "test": "node --test tests/*.test.cjs",
+    "electron:build": "npm run build && electron-builder --publish never"
+  },
+  "build": {
+    "appId": "com.quran.audiocorrector",
+    "productName": "المصحح الصوتي",
+    "directories": {
+      "output": "dist_electron"
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "mac": {
+      "target": "dmg"
+    }
+  },
+  "dependencies": {
+    "@breezystack/lamejs": "^1.2.7",
+    "lucide-react": "^0.562.0",
+    "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "^4.10.38",
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.0",
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.0.0",
+    "autoprefixer": "^10.4.20",
+    "electron": "^40.10.2",
+    "electron-builder": "^26.4.0",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.19",
+    "typescript": "~5.8.2",
+    "vite": "^6.2.0"
+  }
+}
