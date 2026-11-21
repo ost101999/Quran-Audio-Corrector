@@ -51,7 +51,7 @@ let winPdfBuffer = '';
 function ensureWinPdfWorker() {
     if (process.platform !== 'win32') return null;
     if (winPdfWorker && !winPdfWorker.killed) return winPdfWorker;
-    const scriptPath = path.join(__dirname, 'core', 'win-pdf-detector.ps1');
+    const scriptPath = path.join(__dirname, 'core', 'win-pdf-detector.ps1').replace('app.asar', 'app.asar.unpacked');
     if (!fs.existsSync(scriptPath)) return null;
     winPdfWorkerReady = false;
     winPdfBuffer = '';

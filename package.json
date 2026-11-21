@@ -17,8 +17,27 @@
     "directories": {
       "output": "dist_electron"
     },
+    "files": [
+      "dist/**/*",
+      "core/**/*",
+      "main.js",
+      "preload.js",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "core/win-pdf-detector.ps1",
+      "core/pdf-render-helper.html",
+      "node_modules/pdfjs-dist/**"
+    ],
     "win": {
       "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": true,
+      "allowToChangeInstallationDirectory": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "المصحح الصوتي"
     },
     "mac": {
       "target": "dmg"
