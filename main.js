@@ -506,6 +506,17 @@ ipcMain.handle('hud:snap-edge', () => {
     return { ok: true, side: snapRight ? 'right' : 'left' };
 });
 
+ipcMain.handle('hud:get-state', () => {
+    return loadHudState();
+});
+
+ipcMain.handle('hud:save-mic', (_event, payload) => {
+    return saveHudState({
+        micDeviceId: String(payload?.deviceId || ''),
+        micLabel: String(payload?.label || ''),
+    });
+});
+
 ipcMain.handle('hud:list-students', () => {
     const students = getQuranTrackerStudents();
     const shortcuts = readShortcutMushafs();

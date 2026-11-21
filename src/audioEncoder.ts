@@ -3,6 +3,11 @@ import { Mp3Encoder } from '@breezystack/lamejs';
 const SAMPLE_RATE = 24000;
 const SILENCE_THRESHOLD = 0.005;
 
+export interface AudioInputDevice {
+  deviceId: string;
+  label: string;
+}
+
 let sharedToneCtx: AudioContext | null = null;
 
 export function playSoftTone(frequency = 950, durationMs = 90, volume = 0.06) {
@@ -33,6 +38,49 @@ export function playSoftTone(frequency = 950, durationMs = 90, volume = 0.06) {
   } catch { /* ignore */ }
 }
 
+export async function listAudioInputs(): Promise<AudioInputDevice[]> {
+  if (!navigator.mediaDevices?.enumerateDevices) return [];
+  const devs = await navigator.mediaDevices.enumerateDevices();
+  return devs
+    .filter(d => d.kind === 'audioinput')
+    .map((d, idx) => ({
+      deviceId: d.deviceId,
+      label: d.label || `Microphone ${idx + 1}`,
+    }));
+}
+
+function findMatchingInput(
+  inputs: AudioInputDevice[],
+  preferred?: { deviceId?: string; label?: string } | null
+): AudioInputDevice | null {
+  if (inputs.length === 0) return null;
+
+  const prefId = (preferred?.deviceId || '').trim();
+  const prefLabel = (preferred?.label || '').trim().toLowerCase();
+
+  if (prefId || prefLabel) {
+    if (prefId && prefId !== 'default' && prefId !== 'communications') {
+      const byId = inputs.find(d => d.deviceId === prefId);
+      if (byId) return byId;
+    }
+    if (prefLabel) {
+      const exactLabel = inputs.find(d => d.label.toLowerCase() === prefLabel);
+      if (exactLabel) return exactLabel;
+      const cleanPref = prefLabel.replace(/^(default|communications)\s*-\s*/i, '').trim();
+      const bySub = inputs.find(d => d.label.toLowerCase().includes(cleanPref));
+      if (bySub) return bySub;
+    }
+    if (prefId === 'default') {
+      return inputs.find(d => d.deviceId === 'default') || inputs[0];
+    }
+  }
+
+  // First-run default: automatically prefer Voicemeeter Out B1 if available
+  const vmB1 = inputs.find(d => /voicemeeter\s+out\s+b1/i.test(d.label));
+  if (vmB1) return vmB1;
+  return inputs.find(d => d.deviceId === 'default') || inputs[0];
+}
+
 export class Mp3VoiceRecorder {
   private stream: MediaStream | null = null;
   private ctx: AudioContext | null = null;
@@ -42,8 +90,17 @@ export class Mp3VoiceRecorder {
   private collecting = false;
   private startedAt = 0;
   private warmPromise: Promise<void> | null = null;
+  private activeMic: AudioInputDevice | null = null;
+  private preferredMic: { deviceId?: string; label?: string } | null = null;
 
-  async warmUp(): Promise<void> {
+  getActiveMic(): AudioInputDevice | null {
+    return this.activeMic;
+  }
+
+  async warmUp(preferred?: { deviceId?: string; label?: string } | null): Promise<void> {
+    if (preferred !== undefined) {
+      this.preferredMic = preferred;
+    }
     if (this.stream && this.stream.active && this.ctx && this.ctx.state !== 'closed' && this.processor) {
       if (this.ctx.state === 'suspended') {
         await this.ctx.resume().catch(() => {});
@@ -54,14 +111,33 @@ export class Mp3VoiceRecorder {
 
     this.warmPromise = (async () => {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            channelCount: 1,
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true,
-          },
-        });
+        let inputs = await listAudioInputs();
+        // If labels aren't unlocked yet, grant permission once then re-enumerate
+        if (inputs.length === 0 || inputs.every(d => !d.label || /^Microphone \d+$/.test(d.label))) {
+          const probe = await navigator.mediaDevices.getUserMedia({ audio: true });
+          probe.getTracks().forEach(t => t.stop());
+          inputs = await listAudioInputs();
+        }
+
+        const chosen = findMatchingInput(inputs, this.preferredMic);
+        const chosenLabel = chosen?.label || '';
+        const isVirtualMixer = /voicemeeter|vb-audio|sonar/i.test(chosenLabel);
+
+        const audioConstraints: MediaTrackConstraints = {
+          channelCount: 1,
+          echoCancellation: !isVirtualMixer,
+          noiseSuppression: !isVirtualMixer,
+          autoGainControl: !isVirtualMixer,
+        };
+        if (chosen?.deviceId) {
+          audioConstraints.deviceId = { exact: chosen.deviceId };
+        }
+
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
+        const trackLabel = stream.getAudioTracks()[0]?.label || chosenLabel || 'Default';
+        const trackDeviceId = stream.getAudioTracks()[0]?.getSettings?.().deviceId || chosen?.deviceId || 'default';
+        this.activeMic = { deviceId: trackDeviceId, label: trackLabel };
+
         const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
         const ctx = new AudioCtx({ sampleRate: SAMPLE_RATE });
         const source = ctx.createMediaStreamSource(stream);
@@ -83,6 +159,12 @@ export class Mp3VoiceRecorder {
     })();
 
     return this.warmPromise;
+  }
+
+  async switchMic(preferred: { deviceId: string; label: string }): Promise<AudioInputDevice | null> {
+    this.dispose();
+    await this.warmUp(preferred);
+    return this.activeMic;
   }
 
   async start() {

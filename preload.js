@@ -8,6 +8,8 @@ contextBridge.exposeInMainWorld('correctorAPI', {
     initialMode,
     resize: (bounds) => ipcRenderer.invoke('hud:resize', bounds),
     snapEdge: () => ipcRenderer.invoke('hud:snap-edge'),
+    getHudState: () => ipcRenderer.invoke('hud:get-state'),
+    saveMic: (payload) => ipcRenderer.invoke('hud:save-mic', payload),
     listStudents: () => ipcRenderer.invoke('hud:list-students'),
     detectActiveStudent: () => ipcRenderer.invoke('hud:detect-active-student'),
     openOutputFolder: () => ipcRenderer.invoke('hud:open-output-folder'),

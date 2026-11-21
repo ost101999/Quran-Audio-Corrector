@@ -18,7 +18,7 @@ import {
   UserCheck,
   Volume2,
 } from 'lucide-react';
-import { Mp3VoiceRecorder, playSoftTone } from './audioEncoder';
+import { AudioInputDevice, listAudioInputs, Mp3VoiceRecorder, playSoftTone } from './audioEncoder';
 
 type HudMode = 'pill' | 'bar' | 'review';
 
@@ -60,6 +60,9 @@ export default function App() {
   const [recordSeconds, setRecordSeconds] = useState(0);
   const [statusMsg, setStatusMsg] = useState('');
   const [busy, setBusy] = useState(false);
+  const [audioInputs, setAudioInputs] = useState<AudioInputDevice[]>([]);
+  const [activeMic, setActiveMic] = useState<AudioInputDevice | null>(null);
+  const [showMicMenu, setShowMicMenu] = useState(false);
 
   // Review state
   const [matchData, setMatchData] = useState<{
@@ -101,12 +104,37 @@ export default function App() {
     }
   }, [mode]);
 
-  // Warm up microphone pipeline once on boot so pressing F20 records with zero lag
+  // Warm up microphone pipeline once on boot (auto-defaults to Voicemeeter Out B1 or saved choice)
   useEffect(() => {
+    let alive = true;
     const rec = new Mp3VoiceRecorder();
     recorderRef.current = rec;
-    void rec.warmUp().catch(() => {});
+
+    const refreshDevices = async () => {
+      try {
+        const list = await listAudioInputs();
+        if (alive) setAudioInputs(list);
+      } catch { /* ignore */ }
+    };
+
+    const initMic = async () => {
+      try {
+        const saved = await window.correctorAPI?.getHudState().catch(() => null);
+        const pref = saved?.micDeviceId || saved?.micLabel
+          ? { deviceId: saved.micDeviceId, label: saved.micLabel }
+          : null;
+        await rec.warmUp(pref);
+        if (!alive) return;
+        setActiveMic(rec.getActiveMic());
+        await refreshDevices();
+      } catch { /* ignore */ }
+    };
+
+    void initMic();
+    navigator.mediaDevices?.addEventListener?.('devicechange', refreshDevices);
     return () => {
+      alive = false;
+      navigator.mediaDevices?.removeEventListener?.('devicechange', refreshDevices);
       rec.dispose();
     };
   }, []);
@@ -118,11 +146,15 @@ export default function App() {
       const tag = (document.activeElement?.tagName || '').toUpperCase();
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
       e.preventDefault();
+      if (showMicMenu) {
+        setShowMicMenu(false);
+        return;
+      }
       setMode(prev => (prev === 'pill' ? 'bar' : 'pill'));
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, []);
+  }, [showMicMenu]);
 
   // Load students list on boot
   useEffect(() => {
@@ -329,7 +361,11 @@ export default function App() {
       });
       if (res?.success) {
         playSoftTone(1200, 120, 0.06);
-        flashStatus(exportMode === 'web_link' ? 'تم رفع ونسخ الرابط بنجاح ✅' : 'تم حفظ ونسخ ملف HTML ✅', 5000);
+        if ((res.unmatchedCount || 0) > 0) {
+          flashStatus(`تم الحفظ، تنبيه: ${res.unmatchedCount} تسجيل بدون تظليل لم يُضف`, 6000);
+        } else {
+          flashStatus(exportMode === 'web_link' ? 'تم رفع ونسخ الرابط بنجاح ✅' : 'تم حفظ ونسخ ملف HTML ✅', 5000);
+        }
       } else if (res?.needsManualReview) {
         flashStatus('لم يتم العثور على تظليل جديد؛ افتح المعاينة لتثبيت العلامة', 4500);
         await openReviewModal();
@@ -657,7 +693,7 @@ export default function App() {
   // === MODE 2: COMPACT FLOATING HUD BAR ===
   return (
     <div className="w-full h-full p-1.5">
-      <div className="w-full h-full rounded-2xl bg-slate-900/95 backdrop-blur-md text-slate-100 border border-white/15 shadow-2xl flex flex-col justify-between p-3">
+      <div className="relative w-full h-full rounded-2xl bg-slate-900/95 backdrop-blur-md text-slate-100 border border-white/15 shadow-2xl flex flex-col justify-between p-3">
         {/* Draggable Top Bar + Student Picker */}
         <div className="flex items-center justify-between gap-2">
           <div className="hud-drag flex items-center gap-1.5 cursor-grab flex-1 min-w-0">
@@ -705,6 +741,28 @@ export default function App() {
           <div className="hud-no-drag flex items-center gap-1 shrink-0">
             <button
               type="button"
+              disabled={isRecording}
+              onClick={async () => {
+                if (!showMicMenu) {
+                  try { setAudioInputs(await listAudioInputs()); } catch { /* ignore */ }
+                }
+                setShowMicMenu(v => !v);
+              }}
+              className={`px-1.5 py-1 rounded-lg text-[10px] font-bold flex items-center gap-1 max-w-[92px] truncate ${
+                showMicMenu ? 'bg-emerald-500/25 text-emerald-200' : 'bg-white/5 hover:bg-white/15 text-slate-300'
+              }`}
+              title={`المايك الحالي: ${activeMic?.label || 'الافتراضي'} — اضغط للتغيير`}
+            >
+              <Mic size={11} className="text-emerald-400 shrink-0" />
+              <span className="truncate">
+                {(activeMic?.label || 'المايك')
+                  .replace(/^(Default|Communications)\s*-\s*/i, '')
+                  .replace(/\s*\([^)]*\)/g, '')
+                  .trim() || 'المايك'}
+              </span>
+            </button>
+            <button
+              type="button"
               onClick={() => void window.correctorAPI?.openOutputFolder()}
               className="p-1.5 rounded-lg hover:bg-white/10 text-slate-400 hover:text-white"
               title="فتح مجلد الحفظ"
@@ -713,7 +771,7 @@ export default function App() {
             </button>
             <button
               type="button"
-              onClick={() => setMode('pill')}
+              onClick={() => { setShowMicMenu(false); setMode('pill'); }}
               className="p-1.5 rounded-lg hover:bg-white/10 text-slate-400 hover:text-white"
               title="تصغير لكبسولة جانبية"
             >
@@ -721,6 +779,40 @@ export default function App() {
             </button>
           </div>
         </div>
+
+        {/* Inline Mic Switcher Overlay */}
+        {showMicMenu && (
+          <div className="hud-no-drag absolute inset-x-3 top-11 bottom-3 z-30 rounded-xl bg-slate-950/98 border border-white/20 shadow-2xl p-2 flex flex-col gap-1 overflow-y-auto">
+            <div className="text-[11px] font-bold text-slate-400 px-1 pb-1 border-b border-white/10 flex items-center justify-between">
+              <span>اختر المايكروفون</span>
+              <button type="button" onClick={() => setShowMicMenu(false)} className="text-slate-400 hover:text-white">✕</button>
+            </div>
+            {audioInputs.map(dev => {
+              const isCurrent = activeMic?.deviceId === dev.deviceId || (activeMic?.label && activeMic.label === dev.label);
+              return (
+                <button
+                  key={dev.deviceId}
+                  type="button"
+                  onClick={async () => {
+                    if (!recorderRef.current) recorderRef.current = new Mp3VoiceRecorder();
+                    const next = await recorderRef.current.switchMic(dev).catch(() => null);
+                    setActiveMic(next || dev);
+                    await window.correctorAPI?.saveMic(next || dev);
+                    setShowMicMenu(false);
+                    flashStatus(`المايك: ${(next || dev).label}`, 2800);
+                  }}
+                  className={`w-full text-right px-2 py-1.5 rounded-lg text-[11px] flex items-center justify-between gap-2 ${
+                    isCurrent ? 'bg-emerald-600/30 text-emerald-200 font-bold' : 'hover:bg-white/10 text-slate-200'
+                  }`}
+                  title={dev.label}
+                >
+                  <span className="truncate">{dev.label}</span>
+                  {isCurrent && <Check size={12} className="text-emerald-400 shrink-0" />}
+                </button>
+              );
+            })}
+          </div>
+        )}
 
         {/* Main Controls */}
         <div className="flex items-center gap-1.5 my-1">
