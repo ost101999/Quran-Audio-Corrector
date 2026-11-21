@@ -36,6 +36,8 @@ let mainWindow = null;
 let lastKnownDetectedPdf = '';
 let preReviewBounds = null;
 let moveSaveTimer = null;
+let barMovedSinceExpand = false;
+let suppressMoveUntil = 0;
 let winPdfWorker = null;
 let winPdfWorkerReady = false;
 let winPdfQueue = [];
@@ -113,9 +115,9 @@ function clampHudCoordinates(x, y, width, height) {
     const rawX = Number.isFinite(Number(x)) ? Number(x) : primary.x + primary.width - width - 10;
     const rawY = Number.isFinite(Number(y)) ? Number(y) : primary.y + Math.round(primary.height * 0.28);
     const display = screen.getDisplayNearestPoint({ x: Math.round(rawX), y: Math.round(rawY) });
-    const area = display?.workArea || primary;
-    const clampedX = Math.max(area.x + 8, Math.min(Math.round(rawX), area.x + area.width - width - 8));
-    const clampedY = Math.max(area.y + 8, Math.min(Math.round(rawY), area.y + area.height - height - 8));
+    const area = display?.bounds || display?.workArea || primary;
+    const clampedX = Math.max(area.x, Math.min(Math.round(rawX), area.x + area.width - width));
+    const clampedY = Math.max(area.y, Math.min(Math.round(rawY), area.y + area.height - height));
     return { x: clampedX, y: clampedY };
 }
 
@@ -300,7 +302,13 @@ function createWindow() {
     const initialMode = savedHud?.mode === 'pill' ? 'pill' : 'bar';
     const initW = initialMode === 'pill' ? 78 : 410;
     const initH = initialMode === 'pill' ? 112 : 172;
-    const pos = clampHudCoordinates(savedHud?.x, savedHud?.y, initW, initH);
+    const startX = initialMode === 'pill' && Number.isFinite(Number(savedHud?.pillPos?.x))
+        ? savedHud.pillPos.x
+        : savedHud?.x;
+    const startY = initialMode === 'pill' && Number.isFinite(Number(savedHud?.pillPos?.y))
+        ? savedHud.pillPos.y
+        : savedHud?.y;
+    const pos = clampHudCoordinates(startX, startY, initW, initH);
 
     mainWindow = new BrowserWindow({
         width: initW,
@@ -324,23 +332,30 @@ function createWindow() {
     if (process.platform === 'darwin') mainWindow.setAlwaysOnTop(true, 'floating');
     else mainWindow.setAlwaysOnTop(true, 'screen-saver');
 
-    const persistCurrentBounds = () => {
+    const persistCurrentBounds = (fromUserMove = false) => {
         if (!mainWindow || mainWindow.isDestroyed()) return;
         const b = mainWindow.getBounds();
         if (b.width > 460) return; // Never overwrite docked bar/pill position with centered Review modal
-        saveHudState({ x: b.x, y: b.y, mode: b.width <= 120 ? 'pill' : 'bar' });
+        const isPill = b.width <= 120;
+        if (isPill) {
+            saveHudState({ x: b.x, y: b.y, mode: 'pill', pillPos: { x: b.x, y: b.y } });
+        } else {
+            if (fromUserMove) barMovedSinceExpand = true;
+            saveHudState({ x: b.x, y: b.y, mode: 'bar' });
+        }
     };
 
     mainWindow.on('moved', () => {
+        if (Date.now() < suppressMoveUntil) return;
         if (moveSaveTimer) clearTimeout(moveSaveTimer);
-        moveSaveTimer = setTimeout(persistCurrentBounds, 220);
+        moveSaveTimer = setTimeout(() => persistCurrentBounds(true), 220);
     });
     mainWindow.on('close', () => {
         if (moveSaveTimer) {
             clearTimeout(moveSaveTimer);
             moveSaveTimer = null;
         }
-        persistCurrentBounds();
+        persistCurrentBounds(false);
     });
 
     const devUrl = process.env.VITE_DEV_SERVER_URL;
@@ -404,36 +419,71 @@ ipcMain.handle('hud:resize', (_event, { width, height, anchorSide }) => {
     if (!mainWindow || mainWindow.isDestroyed()) return { ok: false };
     const bounds = mainWindow.getBounds();
     const display = screen.getDisplayMatching(bounds);
-    const area = display.workArea;
-    const nextW = Math.max(68, Math.min(Number(width) || 78, area.width - 20));
-    const nextH = Math.max(88, Math.min(Number(height) || 112, area.height - 20));
+    const area = display.bounds || display.workArea;
+    const workArea = display.workArea || area;
+    const nextW = Math.round(Math.max(68, Math.min(Number(width) || 78, workArea.width - 20)));
+    const nextH = Math.round(Math.max(88, Math.min(Number(height) || 112, workArea.height - 20)));
 
     if (anchorSide === 'center') {
         if (bounds.width <= 460) preReviewBounds = { ...bounds };
-        const centerX = Math.max(area.x + 8, Math.round(area.x + (area.width - nextW) / 2));
-        const centerY = Math.max(area.y + 8, Math.round(area.y + (area.height - nextH) / 2));
-        mainWindow.setBounds({ x: centerX, y: centerY, width: Math.round(nextW), height: Math.round(nextH) });
+        suppressMoveUntil = Date.now() + 400;
+        const centerX = Math.max(workArea.x + 8, Math.round(workArea.x + (workArea.width - nextW) / 2));
+        const centerY = Math.max(workArea.y + 8, Math.round(workArea.y + (workArea.height - nextH) / 2));
+        mainWindow.setBounds({ x: centerX, y: centerY, width: nextW, height: nextH });
         return { ok: true };
     }
 
     if (preReviewBounds) {
-        const restoredPos = clampHudCoordinates(preReviewBounds.x, preReviewBounds.y, Math.round(nextW), Math.round(nextH));
+        suppressMoveUntil = Date.now() + 400;
+        const restoredPos = clampHudCoordinates(preReviewBounds.x, preReviewBounds.y, nextW, nextH);
         preReviewBounds = null;
-        mainWindow.setBounds({ x: restoredPos.x, y: restoredPos.y, width: Math.round(nextW), height: Math.round(nextH) });
+        mainWindow.setBounds({ x: restoredPos.x, y: restoredPos.y, width: nextW, height: nextH });
         return { ok: true };
     }
 
-    if (bounds.width === Math.round(nextW) && bounds.height === Math.round(nextH)) {
+    if (bounds.width === nextW && bounds.height === nextH) {
         return { ok: true };
     }
 
-    let nextX = bounds.x;
-    if (bounds.x + bounds.width / 2 > area.x + area.width / 2) {
-        nextX = bounds.x + bounds.width - nextW;
+    suppressMoveUntil = Date.now() + 400;
+    const targetMode = nextW <= 120 ? 'pill' : 'bar';
+    const currentIsPill = bounds.width <= 120;
+
+    if (currentIsPill && targetMode === 'bar') {
+        // Remember exact pill coordinates before expanding, then grow away from screen edges
+        const pillPos = { x: bounds.x, y: bounds.y };
+        barMovedSinceExpand = false;
+        const onRightHalf = (bounds.x + bounds.width / 2) > (area.x + area.width / 2);
+        const onBottomHalf = (bounds.y + bounds.height / 2) > (area.y + area.height / 2);
+        const rawX = onRightHalf ? (bounds.x + bounds.width - nextW) : bounds.x;
+        const rawY = onBottomHalf ? (bounds.y + bounds.height - nextH) : bounds.y;
+        const clamped = clampHudCoordinates(rawX, rawY, nextW, nextH);
+        mainWindow.setBounds({ x: clamped.x, y: clamped.y, width: nextW, height: nextH });
+        saveHudState({ x: clamped.x, y: clamped.y, mode: 'bar', pillPos });
+        return { ok: true };
     }
-    const clamped = clampHudCoordinates(nextX, bounds.y, Math.round(nextW), Math.round(nextH));
-    mainWindow.setBounds({ x: clamped.x, y: clamped.y, width: Math.round(nextW), height: Math.round(nextH) });
-    saveHudState({ x: clamped.x, y: clamped.y, mode: nextW <= 120 ? 'pill' : 'bar' });
+
+    if (!currentIsPill && targetMode === 'pill') {
+        const saved = loadHudState();
+        if (!barMovedSinceExpand && Number.isFinite(Number(saved?.pillPos?.x)) && Number.isFinite(Number(saved?.pillPos?.y))) {
+            const restoredPill = clampHudCoordinates(saved.pillPos.x, saved.pillPos.y, nextW, nextH);
+            mainWindow.setBounds({ x: restoredPill.x, y: restoredPill.y, width: nextW, height: nextH });
+            saveHudState({ x: restoredPill.x, y: restoredPill.y, mode: 'pill', pillPos: restoredPill });
+            return { ok: true };
+        }
+        const onRightHalf = (bounds.x + bounds.width / 2) > (area.x + area.width / 2);
+        const onBottomHalf = (bounds.y + bounds.height / 2) > (area.y + area.height / 2);
+        const rawX = onRightHalf ? (bounds.x + bounds.width - nextW) : bounds.x;
+        const rawY = onBottomHalf ? (bounds.y + bounds.height - nextH) : bounds.y;
+        const clamped = clampHudCoordinates(rawX, rawY, nextW, nextH);
+        mainWindow.setBounds({ x: clamped.x, y: clamped.y, width: nextW, height: nextH });
+        saveHudState({ x: clamped.x, y: clamped.y, mode: 'pill', pillPos: clamped });
+        return { ok: true };
+    }
+
+    const clamped = clampHudCoordinates(bounds.x, bounds.y, nextW, nextH);
+    mainWindow.setBounds({ x: clamped.x, y: clamped.y, width: nextW, height: nextH });
+    saveHudState({ x: clamped.x, y: clamped.y, mode: targetMode });
     return { ok: true };
 });
 

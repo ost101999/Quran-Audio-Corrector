@@ -382,7 +382,6 @@ export default function App() {
     return (
       <div className="w-full h-full flex items-center justify-center p-1.5">
         <div
-          onMouseUp={() => void window.correctorAPI?.snapEdge()}
           className={`hud-drag w-full h-full rounded-2xl border shadow-xl flex flex-col items-center justify-between py-2 px-1 transition-all ${
             isRecording
               ? 'bg-rose-950/95 border-rose-400/70 shadow-rose-500/30'
