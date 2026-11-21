@@ -12,6 +12,7 @@ const { publishAudioSessionToCloud, buildInteractiveHtml } = require('../core/pu
 const {
   loadHudState,
   saveHudState,
+  parseXodoFileNameMapping,
   loadOrCreateSession,
   addAudioClipToSession,
   removeClipFromSession,
@@ -197,6 +198,14 @@ test('session undo (F22), redo (F21), and hud-state persistence work reliably', 
     assert.equal(loadedHud.x, 320);
     assert.equal(loadedHud.y, 140);
     assert.equal(loadedHud.mode, 'bar');
+
+    const mapFile = path.join(tmpDir, 'FileNameMapping.txt');
+    const xml = '\uFEFF<?xml version="1.0" encoding="utf-16"?><ArrayOfKeyValuePair><KeyValuePair><Key>G:\\Books\\Ahmed.pdf</Key><Value>C:\\Xodo\\OpenDocuments\\123\\Ahmed.pdf</Value></KeyValuePair></ArrayOfKeyValuePair>';
+    fs.writeFileSync(mapFile, Buffer.from(xml, 'utf16le'));
+    const parsed = parseXodoFileNameMapping(mapFile);
+    assert.equal(parsed.length, 1);
+    assert.equal(parsed[0].key, 'G:\\Books\\Ahmed.pdf');
+    assert.equal(parsed[0].value, 'C:\\Xodo\\OpenDocuments\\123\\Ahmed.pdf');
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }

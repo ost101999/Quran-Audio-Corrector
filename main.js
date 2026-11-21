@@ -1,7 +1,8 @@
 const { app, BrowserWindow, ipcMain, globalShortcut, screen, clipboard, shell } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
-const { execFile } = require('node:child_process');
+const os = require('node:os');
+const { execFile, spawn } = require('node:child_process');
 const { extractPdfAnnotations, matchClipsToAnnotations, mergeReportAndAudioSections } = require('./core/annotation-matcher');
 const {
     SESSIONS_ROOT_DIR,
@@ -20,6 +21,8 @@ const {
     readClipAudioDataUrl,
     getQuranTrackerStudents,
     readShortcutMushafs,
+    readXodoOpenDocuments,
+    resolveLatestPdfCopyForReading,
     matchWindowTitleToStudent,
 } = require('./core/session-store');
 const {
@@ -33,6 +36,77 @@ let mainWindow = null;
 let lastKnownDetectedPdf = '';
 let preReviewBounds = null;
 let moveSaveTimer = null;
+let winPdfWorker = null;
+let winPdfWorkerReady = false;
+let winPdfQueue = [];
+let winPdfBuffer = '';
+
+function ensureWinPdfWorker() {
+    if (process.platform !== 'win32') return null;
+    if (winPdfWorker && !winPdfWorker.killed) return winPdfWorker;
+    const scriptPath = path.join(__dirname, 'core', 'win-pdf-detector.ps1');
+    if (!fs.existsSync(scriptPath)) return null;
+    winPdfWorkerReady = false;
+    winPdfBuffer = '';
+    const child = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath], {
+        windowsHide: true,
+        stdio: ['pipe', 'pipe', 'ignore'],
+    });
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => {
+        winPdfBuffer += chunk;
+        const lines = winPdfBuffer.split(/\r?\n/);
+        winPdfBuffer = lines.pop() || '';
+        for (const raw of lines) {
+            const trimmed = raw.trim();
+            if (!trimmed) continue;
+            try {
+                const msg = JSON.parse(trimmed);
+                if (msg.ready) {
+                    winPdfWorkerReady = true;
+                    continue;
+                }
+                const next = winPdfQueue.shift();
+                if (next) next.resolve(msg);
+            } catch { /* ignore malformed line */ }
+        }
+    });
+    child.on('exit', () => {
+        winPdfWorker = null;
+        winPdfWorkerReady = false;
+        while (winPdfQueue.length) {
+            const pending = winPdfQueue.shift();
+            if (pending) pending.resolve(null);
+        }
+    });
+    winPdfWorker = child;
+    return child;
+}
+
+function queryWinDesktopPdfState(timeoutMs = 1500) {
+    const child = ensureWinPdfWorker();
+    if (!child || !child.stdin || child.killed) return Promise.resolve(null);
+    return new Promise((resolve) => {
+        let settled = false;
+        const done = (val) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            resolve(val);
+        };
+        const timer = setTimeout(() => {
+            const idx = winPdfQueue.findIndex(q => q.resolve === done);
+            if (idx !== -1) winPdfQueue.splice(idx, 1);
+            done(null);
+        }, winPdfWorkerReady ? timeoutMs : 3500);
+        winPdfQueue.push({ resolve: done });
+        try {
+            child.stdin.write('POLL\n');
+        } catch {
+            done(null);
+        }
+    });
+}
 
 function clampHudCoordinates(x, y, width, height) {
     const primary = screen.getPrimaryDisplay().workArea;
@@ -55,34 +129,59 @@ function runExec(cmd, args, opts = {}) {
 
 async function detectActivePdfApp() {
     if (process.platform === 'win32') {
-        const psScript = [
-            'Add-Type @"',
-            'using System;',
-            'using System.Text;',
-            'using System.Runtime.InteropServices;',
-            'public class WinPoll {',
-            '  public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);',
-            '  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);',
-            '  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);',
-            '  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);',
-            '  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();',
-            '}',
-            '"@',
-            '$fg = [WinPoll]::GetForegroundWindow()',
-            '$sbFg = New-Object System.Text.StringBuilder 512',
-            '[WinPoll]::GetWindowText($fg, $sbFg, 512) | Out-Null',
-            '$fgTitle = $sbFg.ToString()',
-            'if ($fgTitle -match "Xodo|Acrobat") { Write-Output ("FG|" + $fgTitle); exit 0 }',
-            '$script:found = ""',
-            '$cb = [WinPoll+EnumWindowsProc]{ param($h,$l) if ([WinPoll]::IsWindowVisible($h)) { $sb = New-Object System.Text.StringBuilder 512; [WinPoll]::GetWindowText($h, $sb, 512) | Out-Null; $t = $sb.ToString(); if ($t -match "Xodo" -and -not $script:found) { $script:found = "BG|" + $t } }; return $true }',
-            '[WinPoll]::EnumWindows($cb, [IntPtr]::Zero) | Out-Null',
-            'if ($script:found) { Write-Output $script:found }',
-        ].join('\n');
-        const { stdout } = await runExec('powershell.exe', ['-NoProfile', '-Command', psScript], { timeout: 4000 });
-        const line = stdout.trim().split(/\r?\n/).find(Boolean) || '';
-        if (!line) return null;
-        const idx = line.indexOf('|');
-        return { foreground: line.startsWith('FG|'), title: line.slice(idx + 1).trim(), filePath: '' };
+        const [uiaState, xodoTask] = await Promise.all([
+            queryWinDesktopPdfState(1200),
+            runExec('tasklist', ['/FI', 'IMAGENAME eq Xodo.exe', '/NH'], { timeout: 2000 }),
+        ]);
+
+        const openDocs = readXodoOpenDocuments();
+        const findOpenDocByTitle = (rawLabel) => {
+            const clean = String(rawLabel || '').replace(/\.pdf$/i, '').trim().toLowerCase();
+            if (!clean) return null;
+            return openDocs.find(d => {
+                const base = path.basename(d.fileName, '.pdf').trim().toLowerCase();
+                return base === clean || clean.includes(base) || base.includes(clean);
+            }) || null;
+        };
+
+        if (uiaState) {
+            const candidates = [
+                ...(Array.isArray(uiaState.selectedTabs) ? uiaState.selectedTabs : []),
+                ...(uiaState.fgTitle && !/^xodo$/i.test(uiaState.fgTitle.trim()) ? [uiaState.fgTitle] : []),
+                ...(Array.isArray(uiaState.pdfTitles) ? uiaState.pdfTitles.filter(t => !/^xodo$/i.test(String(t || '').trim())) : []),
+            ];
+            for (const label of candidates) {
+                const openMatch = findOpenDocByTitle(label);
+                const resolvedPath = openMatch ? (openMatch.originalPath || openMatch.openCopyPath) : '';
+                const matched = matchWindowTitleToStudent(label, resolvedPath);
+                if (matched) {
+                    return {
+                        foreground: true,
+                        title: openMatch ? openMatch.fileName : label,
+                        filePath: matched.sourcePdfPath || resolvedPath,
+                    };
+                }
+            }
+        }
+
+        if (/Xodo\.exe/i.test(xodoTask.stdout) && openDocs.length > 0) {
+            for (const doc of openDocs) {
+                const candidateMatch = matchWindowTitleToStudent(doc.fileName, doc.originalPath || doc.openCopyPath);
+                if (candidateMatch) {
+                    return {
+                        foreground: true,
+                        title: doc.fileName,
+                        filePath: doc.originalPath || doc.openCopyPath,
+                    };
+                }
+            }
+            return {
+                foreground: true,
+                title: openDocs[0].fileName,
+                filePath: openDocs[0].originalPath || openDocs[0].openCopyPath,
+            };
+        }
+        return null;
     }
 
     if (process.platform === 'darwin') {
@@ -290,6 +389,9 @@ if (!gotSingleInstanceLock) {
 
 app.on('will-quit', () => {
     globalShortcut.unregisterAll();
+    if (winPdfWorker && !winPdfWorker.killed) {
+        try { winPdfWorker.kill(); } catch { /* ignore */ }
+    }
 });
 
 app.on('window-all-closed', () => {
@@ -417,7 +519,8 @@ ipcMain.handle('session:match-annotations', async (_event, { sessionKey, sourceP
         if (autoSave) {
             await triggerAutoSavePdfViewer(pdfPath, session.lastRecordedAt);
         }
-        const bytes = fs.readFileSync(pdfPath);
+        const readablePdfPath = resolveLatestPdfCopyForReading(pdfPath);
+        const bytes = fs.readFileSync(readablePdfPath);
         const annotations = await extractPdfAnnotations(bytes);
         const { markers, unmatchedClips } = matchClipsToAnnotations(session.clips || [], annotations, {
             sessionStartedAt: session.startedAt || 0,
@@ -436,7 +539,7 @@ ipcMain.handle('session:match-annotations', async (_event, { sessionKey, sourceP
             : (recentAnnotatedPages.length > 0 ? recentAnnotatedPages : [1]);
         return {
             success: true,
-            sourcePdfPath: pdfPath,
+            sourcePdfPath: readablePdfPath,
             markers,
             unmatchedClips,
             sections,
@@ -488,7 +591,8 @@ ipcMain.handle('session:export', async (_event, { sessionKey, sourcePdfPath, mod
     if (autoSave) {
         await triggerAutoSavePdfViewer(pdfPath, session.lastRecordedAt);
     }
-    const annotations = await extractPdfAnnotations(fs.readFileSync(pdfPath));
+    const readablePdfPath = resolveLatestPdfCopyForReading(pdfPath);
+    const annotations = await extractPdfAnnotations(fs.readFileSync(readablePdfPath));
     const { markers, unmatchedClips } = matchClipsToAnnotations(session.clips, annotations, {
         sessionStartedAt: session.startedAt || 0,
     });
@@ -505,7 +609,7 @@ ipcMain.handle('session:export', async (_event, { sessionKey, sourcePdfPath, mod
     const { sections, allPdfPages } = mergeReportAndAudioSections({ reportSections: [], markers });
     const renderedImages = await renderPdfPagesToImages({
         BrowserWindow,
-        pdfPath,
+        pdfPath: readablePdfPath,
         pageNumbers: allPdfPages,
         scale: 1.55,
     });

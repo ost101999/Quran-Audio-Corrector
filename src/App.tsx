@@ -647,9 +647,11 @@ export default function App() {
                 className="w-full appearance-none bg-white/10 hover:bg-white/15 text-xs font-bold text-white rounded-lg py-1 pr-2.5 pl-6 truncate cursor-pointer focus:outline-none"
                 title={selectedStudent.sourcePdfPath || 'اختر الطالب'}
               >
-                <option value={selectedStudent.id || selectedStudent.name} className="bg-slate-900 text-white">
-                  {selectedStudent.name}
-                </option>
+                {!students.some(st => (st.id || st.name) === (selectedStudent.id || selectedStudent.name)) && (
+                  <option value={selectedStudent.id || selectedStudent.name} className="bg-slate-900 text-white">
+                    {selectedStudent.name}
+                  </option>
+                )}
                 {students.map(st => (
                   <option key={st.id} value={st.id} className="bg-slate-900 text-white">
                     {st.name}
