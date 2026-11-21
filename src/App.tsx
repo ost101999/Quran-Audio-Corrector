@@ -65,6 +65,7 @@ export default function App() {
   const [matchData, setMatchData] = useState<{
     markers: any[];
     unmatchedClips: SessionClip[];
+    unmatchedNewAnnotations?: any[];
     allPdfPages: number[];
     sourcePdfPath: string;
     error?: string;
@@ -99,6 +100,29 @@ export default function App() {
       void api.resize({ width: 900, height: 760, anchorSide: 'center' });
     }
   }, [mode]);
+
+  // Warm up microphone pipeline once on boot so pressing F20 records with zero lag
+  useEffect(() => {
+    const rec = new Mp3VoiceRecorder();
+    recorderRef.current = rec;
+    void rec.warmUp().catch(() => {});
+    return () => {
+      rec.dispose();
+    };
+  }, []);
+
+  // Toggle between compact Pill and expanded Bar with Esc when HUD window is focused
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || e.repeat) return;
+      const tag = (document.activeElement?.tagName || '').toUpperCase();
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      e.preventDefault();
+      setMode(prev => (prev === 'pill' ? 'bar' : 'pill'));
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
 
   // Load students list on boot
   useEffect(() => {
@@ -159,22 +183,19 @@ export default function App() {
   const toggleRecording = useCallback(async () => {
     if (busy || !window.correctorAPI) return;
     if (!isRecording) {
-      let currentSession = session;
-      if (!currentSession) {
-        currentSession = await window.correctorAPI.loadOrCreateSession({
-          studentId: selectedStudent.id,
-          studentName: selectedStudent.name === 'في انتظار فتح مصحف...' ? 'طالب' : selectedStudent.name,
-          sourcePdfPath: selectedStudent.sourcePdfPath,
-        });
-        setSession(currentSession);
-      }
       try {
-        const rec = new Mp3VoiceRecorder();
-        await rec.start();
-        recorderRef.current = rec;
+        if (!recorderRef.current) recorderRef.current = new Mp3VoiceRecorder();
+        await recorderRef.current.start();
         setIsRecording(true);
         playSoftTone(1050, 90, 0.06);
-        flashStatus('جاري التسجيل... (F17 للإيقاف)');
+        flashStatus('جاري التسجيل... (F20 للإيقاف)');
+        if (!session) {
+          void window.correctorAPI.loadOrCreateSession({
+            studentId: selectedStudent.id,
+            studentName: selectedStudent.name === 'في انتظار فتح مصحف...' ? 'طالب' : selectedStudent.name,
+            sourcePdfPath: selectedStudent.sourcePdfPath,
+          }).then(setSession).catch(() => {});
+        }
       } catch {
         playSoftTone(300, 220, 0.07);
         flashStatus('تعذر فتح الميكروفون');
@@ -184,9 +205,8 @@ export default function App() {
 
     // Stop recording
     const rec = recorderRef.current;
-    recorderRef.current = null;
     setIsRecording(false);
-    if (!rec || !session) return;
+    if (!rec) return;
 
     try {
       const result = await rec.stop();
@@ -195,8 +215,17 @@ export default function App() {
         flashStatus('تم تجاهل تسجيل صامت');
         return;
       }
+      let targetSession = session;
+      if (!targetSession) {
+        targetSession = await window.correctorAPI.loadOrCreateSession({
+          studentId: selectedStudent.id,
+          studentName: selectedStudent.name === 'في انتظار فتح مصحف...' ? 'طالب' : selectedStudent.name,
+          sourcePdfPath: selectedStudent.sourcePdfPath,
+        });
+      }
+      if (!targetSession) return;
       const saved = await window.correctorAPI.addClip({
-        sessionKey: session.sessionKey,
+        sessionKey: targetSession.sessionKey,
         audioBytes: result.bytes,
         ext: 'mp3',
         startedAt: result.startedAt,
@@ -266,6 +295,7 @@ export default function App() {
           sourcePdfPath: matched.sourcePdfPath,
           pageNumbers: [...pagesToRender].sort((a, b) => a - b),
           scale: 1.5,
+          recolorAnnotations: matched.unmatchedNewAnnotations || [],
         });
         if (rendered?.success && rendered?.images && Object.keys(rendered.images).length > 0) {
           setPageImages(rendered.images);
@@ -365,6 +395,7 @@ export default function App() {
         sourcePdfPath: matchData.sourcePdfPath,
         pageNumbers: [p],
         scale: 1.5,
+        recolorAnnotations: matchData.unmatchedNewAnnotations || [],
       });
       if (rendered?.images) {
         setPageImages(prev => ({ ...prev, ...rendered.images }));
@@ -391,7 +422,7 @@ export default function App() {
           <button
             type="button"
             onClick={() => void toggleRecording()}
-            title={isRecording ? 'إيقاف التسجيل (F17)' : 'بدء التسجيل (F17)'}
+            title={isRecording ? 'إيقاف التسجيل (F20)' : 'بدء التسجيل (F20)'}
             className={`hud-no-drag w-10 h-10 rounded-full flex items-center justify-center transition-transform active:scale-95 ${
               isRecording ? 'bg-rose-500 text-white animate-pulse' : 'bg-emerald-500 text-white hover:bg-emerald-400'
             }`}
@@ -602,7 +633,7 @@ export default function App() {
             <div className="flex items-center gap-2">
               <button
                 type="button"
-                disabled={busy || clipsCount === 0}
+                disabled={busy}
                 onClick={() => void handleExport('html')}
                 className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-xs font-bold flex items-center gap-1.5 border border-white/15"
               >
@@ -610,7 +641,7 @@ export default function App() {
               </button>
               <button
                 type="button"
-                disabled={busy || clipsCount === 0}
+                disabled={busy}
                 onClick={() => void handleExport('web_link')}
                 className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-xs font-bold text-white flex items-center gap-1.5 shadow-lg shadow-emerald-600/20"
               >
@@ -704,7 +735,7 @@ export default function App() {
             }`}
           >
             {isRecording ? <Square size={14} fill="currentColor" /> : <Mic size={15} />}
-            <span className="truncate">{isRecording ? `إيقاف (${recordSeconds}ث)` : 'تسجيل (F17)'}</span>
+            <span className="truncate">{isRecording ? `إيقاف (${recordSeconds}ث)` : 'تسجيل (F20)'}</span>
           </button>
 
           <button
@@ -729,7 +760,7 @@ export default function App() {
 
           <button
             type="button"
-            disabled={busy || isRecording || clipsCount === 0}
+            disabled={busy || isRecording}
             onClick={() => void openReviewModal()}
             className="p-2 rounded-xl bg-white/10 hover:bg-white/20 disabled:opacity-35 text-sky-300 shrink-0"
             title="معاينة وتعديل المواضع"
@@ -739,10 +770,10 @@ export default function App() {
 
           <button
             type="button"
-            disabled={busy || clipsCount === 0}
+            disabled={busy}
             onClick={() => void handleExport('web_link')}
             className="py-2 px-2.5 rounded-xl bg-amber-400 hover:bg-amber-300 disabled:opacity-35 text-slate-950 font-bold text-xs flex items-center gap-1 shrink-0"
-            title="إنهاء ونسخ رابط المصحف الصوتي (F20)"
+            title="إنهاء ونسخ رابط المصحف الصوتي (F17)"
           >
             {busy ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
             <span>رابط</span>
@@ -750,7 +781,7 @@ export default function App() {
 
           <button
             type="button"
-            disabled={busy || clipsCount === 0}
+            disabled={busy}
             onClick={() => void handleExport('html')}
             className="p-2 rounded-xl bg-white/10 hover:bg-white/20 disabled:opacity-35 text-amber-300 shrink-0"
             title="حفظ ونسخ ملف HTML تفاعلي"

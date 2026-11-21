@@ -70,6 +70,7 @@ function httpJsonRequest(urlString, { method = 'GET', body } = {}, requestImpl =
 async function renderPdfPagesToImages({
     BrowserWindow,
     pdfPath,
+    pdfBytes = null,
     pageNumbers,
     pdfjsModulePath,
     pdfjsWorkerPath,
@@ -77,11 +78,11 @@ async function renderPdfPagesToImages({
     jpegQuality = 0.84,
 }) {
     if (!BrowserWindow) throw new Error('BrowserWindow is required to render PDF pages');
-    if (!pdfPath || !fs.existsSync(pdfPath)) throw new Error('ملف مصحف الطالب غير موجود.');
+    if (!pdfBytes && (!pdfPath || !fs.existsSync(pdfPath))) throw new Error('ملف مصحف الطالب غير موجود.');
     const uniquePages = [...new Set((pageNumbers || []).filter(p => Number.isInteger(p) && p >= 1))];
     if (uniquePages.length === 0) return {};
 
-    const pdfBase64 = fs.readFileSync(pdfPath).toString('base64');
+    const pdfBase64 = Buffer.from(pdfBytes || fs.readFileSync(pdfPath)).toString('base64');
     const resolvedPdfJs = pdfjsModulePath || require.resolve('pdfjs-dist/legacy/build/pdf.mjs');
     const resolvedWorker = pdfjsWorkerPath || require.resolve('pdfjs-dist/legacy/build/pdf.worker.mjs');
 

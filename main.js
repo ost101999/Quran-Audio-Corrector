@@ -3,7 +3,12 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const { execFile, spawn } = require('node:child_process');
-const { extractPdfAnnotations, matchClipsToAnnotations, mergeReportAndAudioSections } = require('./core/annotation-matcher');
+const {
+    extractPdfAnnotations,
+    matchClipsToAnnotations,
+    recolorAnnotationsToGreenInPdfBytes,
+    mergeReportAndAudioSections,
+} = require('./core/annotation-matcher');
 const {
     SESSIONS_ROOT_DIR,
     loadHudState,
@@ -368,10 +373,10 @@ function createWindow() {
 
 function registerShortcuts() {
     const bindings = [
-        ['F17', 'toggle-record'],
+        ['F20', 'toggle-record'],
         ['F22', 'undo-last'],
         ['F21', 'redo-last'],
-        ['F20', 'finish-export'],
+        ['F17', 'finish-export'],
     ];
     for (const [accel, action] of bindings) {
         try {
@@ -572,12 +577,13 @@ ipcMain.handle('session:match-annotations', async (_event, { sessionKey, sourceP
         const readablePdfPath = resolveLatestPdfCopyForReading(pdfPath);
         const bytes = fs.readFileSync(readablePdfPath);
         const annotations = await extractPdfAnnotations(bytes);
-        const { markers, unmatchedClips } = matchClipsToAnnotations(session.clips || [], annotations, {
+        const { markers, unmatchedClips, unmatchedNewAnnotations } = matchClipsToAnnotations(session.clips || [], annotations, {
             sessionStartedAt: session.startedAt || 0,
         });
         const { sections, allPdfPages } = mergeReportAndAudioSections({
             reportSections: [],
             markers,
+            unmatchedNewAnnotations,
         });
         const recentAnnotatedPages = [...annotations]
             .sort((a, b) => (b.timestampMs || 0) - (a.timestampMs || 0))
@@ -592,6 +598,7 @@ ipcMain.handle('session:match-annotations', async (_event, { sessionKey, sourceP
             sourcePdfPath: readablePdfPath,
             markers,
             unmatchedClips,
+            unmatchedNewAnnotations,
             sections,
             allPdfPages,
             suggestedPages,
@@ -603,6 +610,7 @@ ipcMain.handle('session:match-annotations', async (_event, { sessionKey, sourceP
             sourcePdfPath: pdfPath,
             markers: [],
             unmatchedClips: session.clips || [],
+            unmatchedNewAnnotations: [],
             sections: [],
             allPdfPages: [],
             suggestedPages: [1],
@@ -610,11 +618,16 @@ ipcMain.handle('session:match-annotations', async (_event, { sessionKey, sourceP
     }
 });
 
-ipcMain.handle('session:render-pages', async (_event, { sourcePdfPath, pageNumbers, scale }) => {
+ipcMain.handle('session:render-pages', async (_event, { sourcePdfPath, pageNumbers, scale, recolorAnnotations }) => {
     try {
+        let pdfBytes = null;
+        if (Array.isArray(recolorAnnotations) && recolorAnnotations.length > 0 && sourcePdfPath && fs.existsSync(sourcePdfPath)) {
+            pdfBytes = await recolorAnnotationsToGreenInPdfBytes(fs.readFileSync(sourcePdfPath), recolorAnnotations);
+        }
         const images = await renderPdfPagesToImages({
             BrowserWindow,
             pdfPath: sourcePdfPath,
+            pdfBytes,
             pageNumbers,
             scale: scale || 1.55,
         });
@@ -634,20 +647,22 @@ ipcMain.handle('session:export', async (_event, { sessionKey, sourcePdfPath, mod
     if (!pdfPath || !fs.existsSync(pdfPath)) {
         return { success: false, error: 'ملف PDF الخاص بالطالب غير محدد أو غير موجود.' };
     }
-    if (!session.clips || session.clips.length === 0) {
-        return { success: false, error: 'لا توجد أي تسجيلات صوتية في الجلسة الحالية.' };
-    }
 
     if (autoSave) {
         await triggerAutoSavePdfViewer(pdfPath, session.lastRecordedAt);
     }
     const readablePdfPath = resolveLatestPdfCopyForReading(pdfPath);
-    const annotations = await extractPdfAnnotations(fs.readFileSync(readablePdfPath));
-    const { markers, unmatchedClips } = matchClipsToAnnotations(session.clips, annotations, {
+    const rawPdfBytes = fs.readFileSync(readablePdfPath);
+    const annotations = await extractPdfAnnotations(rawPdfBytes);
+    const { markers, unmatchedClips, unmatchedNewAnnotations } = matchClipsToAnnotations(session.clips || [], annotations, {
         sessionStartedAt: session.startedAt || 0,
     });
 
-    if (markers.length === 0) {
+    if ((!session.clips || session.clips.length === 0) && (!unmatchedNewAnnotations || unmatchedNewAnnotations.length === 0)) {
+        return { success: false, error: 'لا توجد أي تسجيلات صوتية أو تظليلات جديدة في الجلسة الحالية.' };
+    }
+
+    if ((session.clips || []).length > 0 && markers.length === 0) {
         return {
             success: false,
             needsManualReview: true,
@@ -656,10 +671,16 @@ ipcMain.handle('session:export', async (_event, { sessionKey, sourcePdfPath, mod
         };
     }
 
-    const { sections, allPdfPages } = mergeReportAndAudioSections({ reportSections: [], markers });
+    const { sections, allPdfPages } = mergeReportAndAudioSections({
+        reportSections: [],
+        markers,
+        unmatchedNewAnnotations,
+    });
+    const recoloredBytes = await recolorAnnotationsToGreenInPdfBytes(rawPdfBytes, unmatchedNewAnnotations);
     const renderedImages = await renderPdfPagesToImages({
         BrowserWindow,
         pdfPath: readablePdfPath,
+        pdfBytes: recoloredBytes,
         pageNumbers: allPdfPages,
         scale: 1.55,
     });

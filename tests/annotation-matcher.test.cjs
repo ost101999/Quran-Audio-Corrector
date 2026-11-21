@@ -6,6 +6,7 @@ const {
   rectToPagePercent,
   extractPdfAnnotations,
   matchClipsToAnnotations,
+  recolorAnnotationsToGreenInPdfBytes,
   mergeReportAndAudioSections,
 } = require('../core/annotation-matcher');
 const { publishAudioSessionToCloud, buildInteractiveHtml } = require('../core/publisher');
@@ -209,4 +210,54 @@ test('session undo (F22), redo (F21), and hud-state persistence work reliably', 
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
+});
+
+test('unmatched new yellow highlights are detected and recolored to green [0, 1, 0] in memory', async () => {
+  const zlib = require('node:zlib');
+  const doc = await PDFDocument.create();
+  doc.addPage([500, 1000]);
+  doc.addPage([500, 1000]);
+
+  const ap1 = doc.context.flateStream(zlib.deflateSync(Buffer.from('/G0 gs\n1 1 0 RG\n24 w\n10 10 m 50 10 l S', 'latin1')));
+  const ap2 = doc.context.flateStream(zlib.deflateSync(Buffer.from('/G0 gs\n1 1 0 RG\n24 w\n20 20 m 80 20 l S', 'latin1')));
+
+  const t1 = Date.UTC(2026, 10, 22, 0, 10, 0);
+  const t2 = Date.UTC(2026, 10, 22, 0, 12, 0); // No audio clip -> memorization highlight
+
+  const a1 = doc.context.register(doc.context.obj({
+    Type: 'Annot',
+    Subtype: 'Ink',
+    Rect: [100, 600, 200, 640],
+    C: [1, 1, 0],
+    AP: { N: doc.context.register(ap1) },
+    CreationDate: 'D:20261122001002Z',
+  }));
+  const a2 = doc.context.register(doc.context.obj({
+    Type: 'Annot',
+    Subtype: 'Ink',
+    Rect: [150, 400, 250, 440],
+    C: [1, 1, 0],
+    AP: { N: doc.context.register(ap2) },
+    CreationDate: 'D:20261122001200Z',
+  }));
+  doc.getPage(0).node.set(PDFName.of('Annots'), doc.context.obj([a1]));
+  doc.getPage(1).node.set(PDFName.of('Annots'), doc.context.obj([a2]));
+
+  const origBytes = await doc.save();
+  const annots = await extractPdfAnnotations(origBytes);
+  const clips = [{ id: 'c1', fileName: 'c1.mp3', startedAt: t1, endedAt: t1 + 3000, durationMs: 3000 }];
+  const { markers, unmatchedNewAnnotations } = matchClipsToAnnotations(clips, annots, { sessionStartedAt: t1 - 5000 });
+
+  assert.equal(markers.length, 1);
+  assert.equal(markers[0].pdfPage, 1);
+  assert.equal(unmatchedNewAnnotations.length, 1);
+  assert.equal(unmatchedNewAnnotations[0].pdfPage, 2);
+
+  const recoloredBytes = await recolorAnnotationsToGreenInPdfBytes(origBytes, unmatchedNewAnnotations);
+  const reExtracted = await extractPdfAnnotations(recoloredBytes);
+  assert.deepEqual(reExtracted[0].color, [1, 1, 0]); // Matched voice clip stays yellow
+  assert.deepEqual(reExtracted[1].color, [0, 1, 0]); // Unmatched memorization highlight becomes green
+
+  const merged = mergeReportAndAudioSections({ reportSections: [], markers, unmatchedNewAnnotations });
+  assert.deepEqual(merged.allPdfPages, [1, 2]);
 });

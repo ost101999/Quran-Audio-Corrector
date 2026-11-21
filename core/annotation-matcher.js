@@ -1,4 +1,5 @@
-const { PDFDocument, PDFName } = require('pdf-lib');
+const zlib = require('node:zlib');
+const { PDFDocument, PDFName, PDFNumber, PDFRawStream } = require('pdf-lib');
 
 const ANNOTATION_SUBTYPES = new Set([
     '/Ink',
@@ -188,14 +189,13 @@ async function extractPdfAnnotations(pdfDocOrBytes, { pageNumbers = null } = {})
  */
 function matchClipsToAnnotations(clips = [], annotations = [], { sessionStartedAt = 0, preWindowMs = 180000 } = {}) {
     const validClips = Array.isArray(clips) ? clips : [];
-    if (validClips.length === 0) return { markers: [], unmatchedClips: [] };
 
     const earliestClipAt = validClips.reduce((min, clip) => {
         const ts = Number(clip.startedAt || clip.endedAt || 0);
         return ts > 0 && ts < min ? ts : min;
     }, Infinity);
     const baseWindowStart = sessionStartedAt > 0
-        ? Math.min(sessionStartedAt, Number.isFinite(earliestClipAt) ? earliestClipAt : sessionStartedAt)
+        ? (Number.isFinite(earliestClipAt) ? Math.min(sessionStartedAt, earliestClipAt) : sessionStartedAt)
         : (Number.isFinite(earliestClipAt) ? earliestClipAt : 0);
     const minAnnotTime = baseWindowStart > 0 ? baseWindowStart - preWindowMs : 0;
 
@@ -204,6 +204,11 @@ function matchClipsToAnnotations(clips = [], annotations = [], { sessionStartedA
         if (annot.timestampMs == null) return false;
         return annot.timestampMs >= minAnnotTime;
     });
+
+    if (validClips.length === 0) {
+        const unmatchedNewAnnotations = candidates.filter(a => a.isYellow);
+        return { markers: [], unmatchedClips: [], unmatchedNewAnnotations };
+    }
 
     const markers = [];
     const autoClips = [];
@@ -285,7 +290,81 @@ function matchClipsToAnnotations(clips = [], annotations = [], { sessionStartedA
     });
 
     markers.sort((a, b) => (a.pdfPage - b.pdfPage) || ((a.startedAt || 0) - (b.startedAt || 0)));
-    return { markers, unmatchedClips };
+
+    const manualMarkers = markers.filter(m => m.source === 'manual');
+    const unmatchedNewAnnotations = candidates.filter((annot, idx) => {
+        if (usedAnnots.has(idx) || !annot.isYellow) return false;
+        return !manualMarkers.some(m => (
+            m.pdfPage === annot.pdfPage &&
+            Math.hypot((m.xPercent || 0) - (annot.xPercent || 0), (m.yPercent || 0) - (annot.yPercent || 0)) < 6
+        ));
+    });
+
+    return { markers, unmatchedClips, unmatchedNewAnnotations };
+}
+
+/**
+ * Recolors specified annotations (e.g., yellow highlights with no voice clip)
+ * to translucent green [0, 1, 0] in an in-memory copy of the PDF without touching disk files.
+ */
+async function recolorAnnotationsToGreenInPdfBytes(pdfBytes, targetAnnotations = []) {
+    if (!targetAnnotations || targetAnnotations.length === 0) return pdfBytes;
+    const doc = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
+    const pageCount = doc.getPageCount();
+    const byPage = new Map();
+    for (const item of targetAnnotations) {
+        if (!Number.isInteger(item?.pdfPage) || !Number.isInteger(item?.indexInPage)) continue;
+        if (item.pdfPage < 1 || item.pdfPage > pageCount) continue;
+        if (!byPage.has(item.pdfPage)) byPage.set(item.pdfPage, new Set());
+        byPage.get(item.pdfPage).add(item.indexInPage);
+    }
+    if (byPage.size === 0) return pdfBytes;
+
+    for (const [pdfPage, idxSet] of byPage.entries()) {
+        const page = doc.getPage(pdfPage - 1);
+        const annotsObj = page.node.lookup(PDFName.of('Annots'));
+        if (!annotsObj || typeof annotsObj.asArray !== 'function') continue;
+        const refs = annotsObj.asArray();
+        for (const idx of idxSet) {
+            if (idx < 0 || idx >= refs.length) continue;
+            const obj = doc.context.lookup(refs[idx]);
+            if (!obj || typeof obj.set !== 'function') continue;
+            obj.set(PDFName.of('C'), doc.context.obj([0, 1, 0]));
+
+            const apRef = obj.get(PDFName.of('AP'));
+            if (!apRef) continue;
+            try {
+                const ap = doc.context.lookup(apRef);
+                const nRef = ap && typeof ap.get === 'function' ? ap.get(PDFName.of('N')) : null;
+                const nStream = nRef ? doc.context.lookup(nRef) : null;
+                if (nStream instanceof PDFRawStream) {
+                    const filterStr = String(nStream.dict.get(PDFName.of('Filter')) || '');
+                    const rawContents = nStream.contents;
+                    let text = null;
+                    let deflated = false;
+                    if (filterStr.includes('FlateDecode')) {
+                        text = zlib.inflateSync(rawContents).toString('latin1');
+                        deflated = true;
+                    } else if (!filterStr || filterStr === 'undefined') {
+                        text = Buffer.from(rawContents).toString('latin1');
+                    }
+                    if (text !== null) {
+                        const updatedText = text.replace(/\b1(?:\.0+)?\s+1(?:\.0+)?\s+0(?:\.0+)?\s+(RG|rg|SCN|scn)\b/g, '0 1 0 $1');
+                        if (updatedText !== text) {
+                            const outBuf = deflated
+                                ? zlib.deflateSync(Buffer.from(updatedText, 'latin1'))
+                                : Buffer.from(updatedText, 'latin1');
+                            nStream.contents = new Uint8Array(outBuf);
+                            nStream.dict.set(PDFName.of('Length'), PDFNumber.of(outBuf.length));
+                        }
+                    }
+                }
+            } catch {
+                try { obj.delete(PDFName.of('AP')); } catch { /* ignore */ }
+            }
+        }
+    }
+    return await doc.save();
 }
 
 function defaultMapPages(startPage, endPage, pdfPageCount, offset = 0) {
@@ -318,6 +397,7 @@ function defaultMapPages(startPage, endPage, pdfPageCount, offset = 0) {
 function mergeReportAndAudioSections({
     reportSections = [],
     markers = [],
+    unmatchedNewAnnotations = [],
     totalSourcePages,
     pageOffset = 0,
     mapPagesFn = defaultMapPages,
@@ -328,6 +408,10 @@ function mergeReportAndAudioSections({
         if (!Number.isInteger(marker.pdfPage) || marker.pdfPage < 1) continue;
         if (!markersByPdfPage.has(marker.pdfPage)) markersByPdfPage.set(marker.pdfPage, []);
         markersByPdfPage.get(marker.pdfPage).push(marker);
+    }
+    for (const annot of (Array.isArray(unmatchedNewAnnotations) ? unmatchedNewAnnotations : [])) {
+        if (!Number.isInteger(annot?.pdfPage) || annot.pdfPage < 1) continue;
+        if (!markersByPdfPage.has(annot.pdfPage)) markersByPdfPage.set(annot.pdfPage, []);
     }
 
     const coveredPages = new Set();
@@ -397,6 +481,7 @@ module.exports = {
     rectToPagePercent,
     extractPdfAnnotations,
     matchClipsToAnnotations,
+    recolorAnnotationsToGreenInPdfBytes,
     mergeReportAndAudioSections,
     clamp,
 };

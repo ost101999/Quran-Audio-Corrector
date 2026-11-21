@@ -20,7 +20,7 @@ declare global {
       redoClip: (payload: { sessionKey: string }) => Promise<any>;
       updatePin: (payload: { sessionKey: string; clipId: string; pdfPage: number; xPercent: number; yPercent: number }) => Promise<any>;
       matchAnnotations: (payload: { sessionKey: string; sourcePdfPath?: string; autoSave?: boolean }) => Promise<any>;
-      renderPages: (payload: { sourcePdfPath: string; pageNumbers: number[]; scale?: number }) => Promise<{ success: boolean; error?: string; images: Record<string, { imageDataUrl: string; width: number; height: number }> }>;
+      renderPages: (payload: { sourcePdfPath: string; pageNumbers: number[]; scale?: number; recolorAnnotations?: any[] }) => Promise<{ success: boolean; error?: string; images: Record<string, { imageDataUrl: string; width: number; height: number }> }>;
       clipDataUrl: (payload: { sessionKey: string; fileName: string }) => Promise<string>;
       exportSession: (payload: { sessionKey: string; sourcePdfPath?: string; mode: 'web_link' | 'html'; language?: 'ar' | 'en'; autoSave?: boolean }) => Promise<any>;
       onShortcut: (cb: (action: 'toggle-record' | 'undo-last' | 'redo-last' | 'finish-export') => void) => () => void;
