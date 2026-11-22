@@ -398,6 +398,7 @@ function mergeReportAndAudioSections({
     reportSections = [],
     markers = [],
     unmatchedNewAnnotations = [],
+    includeExtraPages = true,
     totalSourcePages,
     pageOffset = 0,
     mapPagesFn = defaultMapPages,
@@ -409,9 +410,11 @@ function mergeReportAndAudioSections({
         if (!markersByPdfPage.has(marker.pdfPage)) markersByPdfPage.set(marker.pdfPage, []);
         markersByPdfPage.get(marker.pdfPage).push(marker);
     }
-    for (const annot of (Array.isArray(unmatchedNewAnnotations) ? unmatchedNewAnnotations : [])) {
-        if (!Number.isInteger(annot?.pdfPage) || annot.pdfPage < 1) continue;
-        if (!markersByPdfPage.has(annot.pdfPage)) markersByPdfPage.set(annot.pdfPage, []);
+    if (includeExtraPages) {
+        for (const annot of (Array.isArray(unmatchedNewAnnotations) ? unmatchedNewAnnotations : [])) {
+            if (!Number.isInteger(annot?.pdfPage) || annot.pdfPage < 1) continue;
+            if (!markersByPdfPage.has(annot.pdfPage)) markersByPdfPage.set(annot.pdfPage, []);
+        }
     }
 
     const coveredPages = new Set();
@@ -432,19 +435,25 @@ function mergeReportAndAudioSections({
         });
         sections.push({
             key: sec.key || 'section',
+            group: sec.group || '',
+            groupTitleAr: sec.groupTitleAr || '',
+            groupTitleEn: sec.groupTitleEn || '',
             titleAr: sec.titleAr || '',
             titleEn: sec.titleEn || '',
             summaryAr: sec.summaryAr || '',
             summaryEn: sec.summaryEn || '',
             startPage: sec.startPage,
             endPage: sec.endPage,
+            verseSpan: sec.verseSpan || null,
             pages,
         });
     }
 
-    const extraPages = [...markersByPdfPage.keys()]
-        .filter(p => !coveredPages.has(p))
-        .sort((a, b) => a - b);
+    const extraPages = includeExtraPages
+        ? [...markersByPdfPage.keys()]
+            .filter(p => !coveredPages.has(p))
+            .sort((a, b) => a - b)
+        : [];
 
     if (extraPages.length > 0) {
         sections.push({
