@@ -568,7 +568,7 @@ export default function App() {
                 ? 'linear-gradient(160deg, rgba(136, 19, 55, 0.94), rgba(30, 10, 20, 0.97))'
                 : 'linear-gradient(160deg, rgba(30, 41, 59, 0.93), rgba(15, 23, 42, 0.97))',
           }}
-          className={`hud-drag w-full h-full rounded-[22px] border flex flex-col items-center justify-between py-2 px-1.5 transition-all duration-300 ${
+          className={`hud-drag relative w-full h-full rounded-[22px] border flex flex-col items-center justify-between py-2 px-1.5 transition-all duration-300 ${
             busy
               ? 'border-sky-400/60'
               : isRecording
@@ -576,6 +576,20 @@ export default function App() {
                 : 'border-emerald-400/35'
           }`}
         >
+          {updateInfo?.status === 'available' && (
+            <button
+              type="button"
+              onClick={() => {
+                setShowMicMenu(false);
+                setShowUpdateMenu(true);
+                setMode('bar');
+              }}
+              title={`تحديث جديد متاح (v${updateInfo.latest}) — اضغط للفتح`}
+              className="hud-no-drag absolute -top-1.5 -left-1.5 w-5 h-5 rounded-full bg-amber-400 hover:bg-amber-300 text-slate-950 border border-slate-900 shadow-md flex items-center justify-center z-20 transition-transform hover:scale-110 active:scale-95"
+            >
+              <Bell size={10} strokeWidth={2.6} />
+            </button>
+          )}
           {/* Compact Student Name */}
           <div
             className="w-full px-1 flex items-center justify-center gap-1"
