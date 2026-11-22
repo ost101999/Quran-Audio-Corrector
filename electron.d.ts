@@ -8,6 +8,8 @@ declare global {
       resize: (bounds: { width: number; height: number; anchorSide?: 'edge' | 'center' }) => Promise<{ ok: boolean }>;
       snapEdge: () => Promise<{ ok: boolean; side?: 'left' | 'right' }>;
       getHudState: () => Promise<{ micDeviceId?: string; micLabel?: string; mode?: 'pill' | 'bar' }>;
+      showContextMenu: () => Promise<void>;
+      hideToTray: () => Promise<{ ok: boolean }>;
       saveMic: (payload: { deviceId: string; label: string }) => Promise<any>;
       listStudents: () => Promise<Array<{ id: string; name: string; academy: string; sourcePdfPath: string }>>;
       detectActiveStudent: () => Promise<{

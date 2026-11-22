@@ -494,7 +494,13 @@ export default function App() {
         : '0 6px 14px -3px rgba(16, 185, 129, 0.42)';
 
     return (
-      <div className="w-full h-full flex items-center justify-center p-5">
+      <div
+        className="w-full h-full flex items-center justify-center p-5"
+        onContextMenu={(e) => {
+          e.preventDefault();
+          void window.correctorAPI?.showContextMenu();
+        }}
+      >
         <div
           style={{
             boxShadow: pillShadow,
@@ -522,7 +528,7 @@ export default function App() {
                 selectedStudent.sourcePdfPath ? 'bg-emerald-400' : 'bg-amber-400'
               }`}
             />
-            <span className="text-[10px] font-bold text-slate-200 truncate leading-tight">
+            <span dir="auto" className="text-[10px] font-bold text-slate-200 truncate leading-tight">
               {shortStudentName}
             </span>
           </div>
@@ -790,7 +796,13 @@ export default function App() {
 
   // === MODE 2: COMPACT FLOATING HUD BAR ===
   return (
-    <div className="w-full h-full p-4">
+    <div
+      className="w-full h-full p-4"
+      onContextMenu={(e) => {
+        e.preventDefault();
+        void window.correctorAPI?.showContextMenu();
+      }}
+    >
       <div
         style={{
           boxShadow: '0 10px 24px -6px rgba(2, 6, 23, 0.55), 0 4px 12px -4px rgba(16, 185, 129, 0.12)',

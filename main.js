@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, globalShortcut, screen, clipboard, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, globalShortcut, screen, clipboard, shell, Tray, Menu, nativeImage } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
@@ -38,6 +38,8 @@ const {
 } = require('./core/publisher');
 
 let mainWindow = null;
+let tray = null;
+let isQuitting = false;
 let lastKnownDetectedPdf = '';
 let preReviewBounds = null;
 let moveSaveTimer = null;
@@ -317,6 +319,7 @@ function createWindow() {
         height: initH,
         x: pos.x,
         y: pos.y,
+        title: 'المصحح الصوتي',
         icon: path.join(__dirname, '.icons', process.platform === 'win32' ? 'app-icon.ico' : 'app-icon.png'),
         frame: false,
         transparent: true,
@@ -354,12 +357,28 @@ function createWindow() {
         if (moveSaveTimer) clearTimeout(moveSaveTimer);
         moveSaveTimer = setTimeout(() => persistCurrentBounds(true), 220);
     });
-    mainWindow.on('close', () => {
+    mainWindow.on('show', () => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.setSkipTaskbar(false);
+        }
+        updateTrayMenu();
+    });
+    mainWindow.on('hide', () => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.setSkipTaskbar(true);
+        }
+        updateTrayMenu();
+    });
+    mainWindow.on('close', (ev) => {
         if (moveSaveTimer) {
             clearTimeout(moveSaveTimer);
             moveSaveTimer = null;
         }
         persistCurrentBounds(false);
+        if (!isQuitting && process.platform !== 'darwin') {
+            ev.preventDefault();
+            hideHudWindow();
+        }
     });
 
     const devUrl = process.env.VITE_DEV_SERVER_URL;
@@ -368,6 +387,63 @@ function createWindow() {
     } else {
         mainWindow.loadFile(path.join(__dirname, 'dist', 'index.html'));
     }
+}
+
+function showHudWindow() {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.setSkipTaskbar(false);
+    mainWindow.show();
+    mainWindow.focus();
+}
+
+function hideHudWindow() {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    mainWindow.hide();
+    mainWindow.setSkipTaskbar(true);
+}
+
+function buildHudMenu() {
+    const visible = Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible());
+    return Menu.buildFromTemplate([
+        visible
+            ? { label: 'إخفاء بجانب الساعة', click: () => hideHudWindow() }
+            : { label: 'إظهار المصحح الصوتي', click: () => showHudWindow() },
+        { type: 'separator' },
+        {
+            label: 'إغلاق المصحح الصوتي',
+            click: () => {
+                isQuitting = true;
+                app.quit();
+            },
+        },
+    ]);
+}
+
+function updateTrayMenu() {
+    if (!tray || tray.isDestroyed()) return;
+    tray.setContextMenu(buildHudMenu());
+}
+
+function createTray() {
+    if (tray && !tray.isDestroyed()) return tray;
+    const pngPath = path.join(__dirname, '.icons', 'app-icon.png');
+    const icoPath = path.join(__dirname, '.icons', 'app-icon.ico');
+    let trayIcon = fs.existsSync(pngPath)
+        ? nativeImage.createFromPath(pngPath)
+        : (fs.existsSync(icoPath) ? nativeImage.createFromPath(icoPath) : nativeImage.createEmpty());
+    if (!trayIcon.isEmpty()) {
+        trayIcon = trayIcon.resize({ width: 32, height: 32 });
+    }
+    tray = new Tray(trayIcon);
+    tray.setToolTip('المصحح الصوتي (RCtrl + R)');
+    tray.on('click', () => {
+        if (!mainWindow || mainWindow.isDestroyed()) return;
+        if (mainWindow.isVisible()) hideHudWindow();
+        else showHudWindow();
+    });
+    updateTrayMenu();
+    return tray;
 }
 
 function registerShortcuts() {
@@ -393,21 +469,25 @@ if (!gotSingleInstanceLock) {
     app.quit();
 } else {
     app.on('second-instance', () => {
-        if (mainWindow && !mainWindow.isDestroyed()) {
-            if (mainWindow.isMinimized()) mainWindow.restore();
-            mainWindow.show();
-            mainWindow.focus();
-        }
+        showHudWindow();
     });
     app.whenReady().then(() => {
         fs.mkdirSync(SESSIONS_ROOT_DIR, { recursive: true });
         createWindow();
+        createTray();
         registerShortcuts();
     });
 }
 
+app.on('before-quit', () => {
+    isQuitting = true;
+});
+
 app.on('will-quit', () => {
     globalShortcut.unregisterAll();
+    if (tray && !tray.isDestroyed()) {
+        try { tray.destroy(); } catch { /* ignore */ }
+    }
     if (winPdfWorker && !winPdfWorker.killed) {
         try { winPdfWorker.kill(); } catch { /* ignore */ }
     }
@@ -418,6 +498,16 @@ app.on('window-all-closed', () => {
 });
 
 // === IPC Handlers ===
+
+ipcMain.handle('hud:show-context-menu', () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    buildHudMenu().popup({ window: mainWindow });
+});
+
+ipcMain.handle('hud:hide-to-tray', () => {
+    hideHudWindow();
+    return { ok: true };
+});
 
 ipcMain.handle('hud:resize', (_event, { width, height, anchorSide }) => {
     if (!mainWindow || mainWindow.isDestroyed()) return { ok: false };

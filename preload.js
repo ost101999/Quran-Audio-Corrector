@@ -9,6 +9,8 @@ contextBridge.exposeInMainWorld('correctorAPI', {
     resize: (bounds) => ipcRenderer.invoke('hud:resize', bounds),
     snapEdge: () => ipcRenderer.invoke('hud:snap-edge'),
     getHudState: () => ipcRenderer.invoke('hud:get-state'),
+    showContextMenu: () => ipcRenderer.invoke('hud:show-context-menu'),
+    hideToTray: () => ipcRenderer.invoke('hud:hide-to-tray'),
     saveMic: (payload) => ipcRenderer.invoke('hud:save-mic', payload),
     listStudents: () => ipcRenderer.invoke('hud:list-students'),
     detectActiveStudent: () => ipcRenderer.invoke('hud:detect-active-student'),
