@@ -31,11 +31,15 @@ test('parsePdfDate handles Z, explicit offsets, and local PDF dates accurately',
 });
 
 test('rectToPagePercent converts full-page PDF coordinates independent of viewer zoom', () => {
-  // Page 500x1000, bottom-left origin in PDF -> rect near top-right word
+  // Page 500x1000, bottom-left origin in PDF -> rect near top-right word (center Y = 800 -> +1.4% above center = 814)
   const res = rectToPagePercent([300, 780, 400, 820], { x: 0, y: 0, width: 500, height: 1000 }, 0);
-  // center X = 350 -> 70%, anchorY = 780 + 40*0.85 = 814 -> from top = (1000 - 814)/1000 = 18.6%
   assert.equal(res.xPercent, 70);
   assert.equal(res.yPercent, 18.6);
+
+  // Thin vs tall annotations centered on the same word must land at the exact same line-gap height
+  const thin = rectToPagePercent([300, 790, 400, 810], { x: 0, y: 0, width: 500, height: 1000 }, 0);
+  const tall = rectToPagePercent([300, 767, 400, 833], { x: 0, y: 0, width: 500, height: 1000 }, 0);
+  assert.equal(thin.yPercent, tall.yPercent);
 });
 
 test('extractPdfAnnotations & matchClipsToAnnotations match timestamps 1-to-1 and keep manual overrides', async () => {

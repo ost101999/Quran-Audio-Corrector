@@ -270,7 +270,7 @@ function loadPublisherFresh() {
   return require('./core/publisher');
 }
 
-function buildDevOverlaySnippet({ source, mode, langPref, sessionId, sessionsList, isRealData, clean }) {
+function buildDevOverlaySnippet({ source, mode, langPref, sessionId, studentName, sessionsList, isRealData, clean }) {
   const reloadScript = `
 <script>
 (function() {
@@ -301,6 +301,7 @@ function buildDevOverlaySnippet({ source, mode, langPref, sessionId, sessionsLis
     p.set('source', targetSource);
     p.set('mode', targetMode);
     if (targetSession) p.set('session', targetSession);
+    if (patch.matchName) p.set('matchName', patch.matchName);
     if (targetLang && targetLang !== 'auto') p.set('lang', targetLang);
     if (patch.refresh) p.set('refresh', '1');
     return `/?${p.toString()}`;
@@ -383,7 +384,7 @@ function buildDevOverlaySnippet({ source, mode, langPref, sessionId, sessionsLis
 </style>
 <div id="html-dev-bar" title="معاينة فورية لبياناتك — تتحدث تلقائياً بدون نشر">
   <span class="dev-dot"></span>
-  <a class="src-pill" href="${escapeHtml(makeUrl({ source: nextSource, sessionId: '' }))}" title="التبديل بين السحابة الحية ومعالجة PDF محلياً بدون نشر">
+  <a class="src-pill" href="${escapeHtml(makeUrl({ source: nextSource, sessionId: '', matchName: studentName || '' }))}" title="التبديل بين السحابة الحية ومعالجة PDF محلياً بدون نشر">
     ${source === 'local' ? 'توليد حي من PDF' : 'السحابة الحية'}
   </a>
   ${optionsMarkup ? `<select id="dev-session-select" aria-label="اختر جلسة حقيقية">${optionsMarkup}</select>` : ''}
@@ -430,16 +431,25 @@ function renderWebAppWithSession({ webHtml, source, langPref, overlay }) {
   return injectBeforeLastBodyClose(html, overlay);
 }
 
-async function resolveSessionForRequest({ source, requestedId, forceRefresh }) {
+async function resolveSessionForRequest({ source, requestedId, matchName = '', forceRefresh }) {
   if (source === 'local') {
     const list = listLocalPdfSessions();
-    const target = (requestedId && list.find(x => x.id === requestedId)) || list[0] || null;
+    const normMatch = String(matchName || '').trim().toLowerCase();
+    const target = (requestedId && list.find(x => x.id === requestedId))
+      || (normMatch && list.find(x => String(x.studentName || '').trim().toLowerCase() === normMatch))
+      || list[0]
+      || null;
     if (!target) return { session: null, sessionId: '', list: [], isRealData: false };
     const session = await runLiveLocalPdfWorker(target, forceRefresh);
     return { session, sessionId: target.id, list, isRealData: Boolean(session) };
   }
   try {
     const res = await getCloudSessionData(requestedId, forceRefresh);
+    if (!requestedId && matchName && Array.isArray(res.list)) {
+      const normMatch = String(matchName).trim().toLowerCase();
+      const matched = res.list.find(x => x.label.toLowerCase().includes(normMatch));
+      if (matched) return { ...(await getCloudSessionData(matched.id, forceRefresh)), isRealData: true };
+    }
     return { ...res, isRealData: Boolean(res.session) };
   } catch (err) {
     console.warn('تعذر جلب الجلسة السحابية، سيتم استخدام نموذج احتياطي:', err.message);
@@ -457,10 +467,12 @@ async function renderPreviewPage(urlObj) {
   const clean = urlObj.searchParams.get('clean') === '1';
   const forceRefresh = urlObj.searchParams.get('refresh') === '1';
   const requestedId = urlObj.searchParams.get('session') || urlObj.searchParams.get('mushaf') || '';
+  const matchName = urlObj.searchParams.get('matchName') || '';
 
   const { session, sessionId, list, isRealData } = await resolveSessionForRequest({
     source,
     requestedId: requestedId === 'live_local' ? '' : requestedId,
+    matchName,
     forceRefresh,
   });
 
@@ -472,6 +484,7 @@ async function renderPreviewPage(urlObj) {
     mode,
     langPref,
     sessionId,
+    studentName: sessionData.studentName || '',
     sessionsList: list,
     isRealData,
     clean,
@@ -479,9 +492,11 @@ async function renderPreviewPage(urlObj) {
 
   if (mode === 'web' && hasWebApp && isRealData) {
     const webHtml = fs.readFileSync(WEB_APP_HTML_PATH, 'utf8');
+    const needsCanonicalRedirect = !urlObj.searchParams.get('mushaf')
+      || (matchName && sessionId && urlObj.searchParams.get('session') !== sessionId);
     return {
       html: renderWebAppWithSession({ webHtml, source, langPref, overlay }),
-      redirectToMushaf: !urlObj.searchParams.get('mushaf')
+      redirectToMushaf: needsCanonicalRedirect
         ? `/?mushaf=${encodeURIComponent(sessionId || 'live_local')}&source=${source}&mode=web${sessionId ? `&session=${encodeURIComponent(sessionId)}` : ''}${langPref !== 'auto' ? `&lang=${langPref}` : ''}`
         : null,
     };
