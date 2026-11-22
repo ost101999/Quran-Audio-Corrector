@@ -320,6 +320,7 @@ function createWindow() {
         height: initH,
         x: pos.x,
         y: pos.y,
+        icon: path.join(__dirname, '.icons', process.platform === 'win32' ? 'app-icon.ico' : 'app-icon.png'),
         frame: false,
         transparent: true,
         alwaysOnTop: true,
