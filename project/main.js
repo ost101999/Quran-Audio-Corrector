@@ -195,30 +195,109 @@ async function detectActivePdfApp() {
         const script = [
             'tell application "System Events"',
             '  set frontApp to name of first application process whose frontmost is true',
-            '  if frontApp contains "Acrobat" or (exists process "Adobe Acrobat") then',
+            '  set docName to ""',
+            '  set docPath to ""',
+            '  set hasAcrobat to (exists (some application process whose name contains "Acrobat"))',
+            '  set hasPreview to (exists process "Preview")',
+            '  set checkPreviewFirst to (frontApp is "Preview") or (not hasAcrobat and hasPreview)',
+            '  if checkPreviewFirst and hasPreview then',
             '    try',
-            '      tell application "Adobe Acrobat"',
-            '        if (count of documents) > 0 then',
-            '          set d to front document',
-            '          set p to POSIX path of (file alias of d)',
-            '          set n to name of d',
-            '          return frontApp & "|" & n & "|" & p',
-            '        end if',
-            '      end tell',
+            '      set docName to name of front window of process "Preview"',
             '    end try',
+            '    if docName is "" or docName is "Preview" then',
+            '      try',
+            '        tell application "Preview"',
+            '          if (count of documents) > 0 then',
+            '            set d to front document',
+            '            set docName to name of d',
+            '            try',
+            '              set docPath to POSIX path of (path of d)',
+            '            end try',
+            '          end if',
+            '        end tell',
+            '      end try',
+            '    end if',
+            '  else if hasAcrobat then',
+            '    try',
+            '      set acrobatProc to first application process whose name contains "Acrobat"',
+            '      set docName to name of front window of acrobatProc',
+            '    end try',
+            '    if docName is "" or docName contains "Acrobat" then',
+            '      try',
+            '        tell application "Adobe Acrobat"',
+            '          if (count of documents) > 0 then',
+            '            set d to front document',
+            '            set docName to name of d',
+            '            try',
+            '              set docPath to POSIX path of (file alias of d)',
+            '            end try',
+            '          end if',
+            '        end tell',
+            '      end try',
+            '    end if',
             '  end if',
+            '  if docName is not "" then return frontApp & "|" & docName & "|" & docPath',
             'end tell',
             'return ""',
         ].join('\n');
-        const { stdout } = await runExec('osascript', ['-e', script], { timeout: 4000 });
-        const line = stdout.trim();
-        if (!line) return null;
-        const [frontApp, name, filePath] = line.split('|');
-        return {
-            foreground: /Acrobat/i.test(frontApp || ''),
-            title: (name || '').trim(),
-            filePath: (filePath || '').trim(),
-        };
+
+        const lsofPromise = runExec('/usr/sbin/lsof', ['-c', 'AdobeAcrobat', '-c', 'Preview', '-Fn'], { timeout: 2500 });
+        const osaPromise = runExec('osascript', ['-e', script], { timeout: 3500 });
+        const [lsofRes, osaRes] = await Promise.all([lsofPromise, osaPromise]);
+
+        const openPdfs = [];
+        const seenPdfs = new Set();
+        for (const rawLine of String(lsofRes?.stdout || '').split(/\r?\n/)) {
+            if (!rawLine.startsWith('n/')) continue;
+            const p = rawLine.slice(1).trim();
+            if (!/\.pdf$/i.test(p)) continue;
+            if (/^\/(?:Applications|System)\//i.test(p)) continue;
+            if (/^\/Library\//i.test(p) && !/^\/Library\/CloudStorage\//i.test(p)) continue;
+            if (seenPdfs.has(p) || !fs.existsSync(p)) continue;
+            seenPdfs.add(p);
+            openPdfs.push(p);
+        }
+
+        const line = String(osaRes?.stdout || '').trim();
+        if (line) {
+            const [frontApp, rawName, rawFilePath] = line.split('|');
+            const title = (rawName || '').trim();
+            let filePath = (rawFilePath || '').trim();
+            if (!filePath && title) {
+                const normTitle = normalizeText(path.basename(title, '.pdf'));
+                const matchedOpen = openPdfs.find((p) => {
+                    const normBase = normalizeText(path.basename(p, '.pdf'));
+                    return normBase === normTitle || normTitle.includes(normBase) || normBase.includes(normTitle);
+                });
+                if (matchedOpen) filePath = matchedOpen;
+            }
+            if (title || filePath) {
+                return {
+                    foreground: /Acrobat|Preview/i.test(frontApp || ''),
+                    title: title || path.basename(filePath),
+                    filePath,
+                };
+            }
+        }
+
+        if (openPdfs.length > 0) {
+            for (const p of openPdfs) {
+                const candidate = matchWindowTitleToStudent(path.basename(p), p);
+                if (candidate) {
+                    return {
+                        foreground: true,
+                        title: path.basename(p),
+                        filePath: candidate.sourcePdfPath || p,
+                    };
+                }
+            }
+            return {
+                foreground: true,
+                title: path.basename(openPdfs[0]),
+                filePath: openPdfs[0],
+            };
+        }
+        return null;
     }
     return null;
 }
@@ -255,12 +334,23 @@ async function triggerAutoSavePdfViewer(sourcePdfPath, lastRecordedAt) {
         ].join('\n');
         await runExec('powershell.exe', ['-NoProfile', '-Command', psSave], { timeout: 5000 });
     } else if (process.platform === 'darwin') {
+        const targetName = path.basename(sourcePdfPath);
         const script = [
-            'tell application "Adobe Acrobat"',
-            '  if (count of documents) > 0 then save front document',
-            'end tell',
+            'on run argv',
+            '  set targetName to item 1 of argv',
+            '  tell application "Adobe Acrobat"',
+            '    if (count of documents) > 0 then',
+            '      set matchedDocs to (every document whose name is targetName)',
+            '      if (count of matchedDocs) > 0 then',
+            '        save item 1 of matchedDocs',
+            '      else',
+            '        save front document',
+            '      end if',
+            '    end if',
+            '  end tell',
+            'end run',
         ].join('\n');
-        await runExec('osascript', ['-e', script], { timeout: 5000 });
+        await runExec('osascript', ['-e', script, targetName], { timeout: 5000 });
     }
 
     const deadline = Date.now() + 2600;

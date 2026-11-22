@@ -44,7 +44,10 @@
     },
     "mac": {
       "target": "dmg",
-      "icon": ".icons/app-icon.png"
+      "icon": ".icons/app-icon.png",
+      "extendInfo": {
+        "NSAppleEventsUsageDescription": "يحتاج المصحح الصوتي إلى الوصول لبرنامج قراءة PDF للتعرف على مصحف الطالب المفتوح وحفظ التظليلات."
+      }
     }
   },
   "dependencies": {
