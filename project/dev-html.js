@@ -93,17 +93,40 @@ async function listRecentCloudSessions(forceRefresh = false) {
   if (!forceRefresh && cachedIndexList && (now - cachedIndexAt) < 12000) {
     return cachedIndexList;
   }
-  const shallow = await fetchJson(`${FIREBASE_BASE_URL}/audioMushafSessions.json?shallow=true`, 10000);
+  const [shallow, indexByStudent] = await Promise.all([
+    fetchJson(`${FIREBASE_BASE_URL}/audioMushafSessions.json?shallow=true`, 10000),
+    fetchJson(`${FIREBASE_BASE_URL}/audioMushafIndex.json`, 10000).catch(() => ({})),
+  ]);
+  const metaFromIndex = new Map();
+  if (indexByStudent && typeof indexByStudent === 'object') {
+    for (const [sk, sessMap] of Object.entries(indexByStudent)) {
+      if (!sessMap || typeof sessMap !== 'object') continue;
+      for (const [sid, ts] of Object.entries(sessMap)) {
+        metaFromIndex.set(sid, { studentKey: sk, createdAt: Number(ts) || 0 });
+      }
+    }
+  }
   const keys = shallow && typeof shallow === 'object' ? Object.keys(shallow) : [];
   const nameMap = loadLocalStudentNameMap();
   const items = keys
-    .map(parseSessionIdMeta)
+    .map(k => {
+      const parsed = parseSessionIdMeta(k);
+      const indexed = metaFromIndex.get(k);
+      if (indexed) {
+        parsed.studentKey = indexed.studentKey || parsed.studentKey;
+        if (indexed.createdAt > parsed.createdAt) parsed.createdAt = indexed.createdAt;
+        if (!parsed.dateStr && parsed.createdAt) {
+          parsed.dateStr = new Date(parsed.createdAt).toLocaleDateString('en-CA');
+        }
+      }
+      return parsed;
+    })
     .sort((a, b) => b.createdAt - a.createdAt)
     .slice(0, 14)
     .map(item => {
       const knownName = nameMap.get(String(item.studentKey).toLowerCase());
       const cached = cloudSessionCache.get(item.id);
-      const displayName = cached?.studentName || knownName || item.studentKey;
+      const displayName = cached?.studentName || knownName || item.studentKey || item.id;
       const timeLabel = item.createdAt
         ? new Date(item.createdAt).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })
         : '';
@@ -466,7 +489,11 @@ async function renderPreviewPage(urlObj) {
   const langPref = langParam === 'ar' || langParam === 'en' ? langParam : 'auto';
   const clean = urlObj.searchParams.get('clean') === '1';
   const forceRefresh = urlObj.searchParams.get('refresh') === '1';
-  const requestedId = urlObj.searchParams.get('session') || urlObj.searchParams.get('mushaf') || '';
+  const pathMatch = urlObj.pathname.match(/^\/m\/([^/]+)\/?$/i);
+  const requestedId = urlObj.searchParams.get('session')
+    || urlObj.searchParams.get('mushaf')
+    || urlObj.searchParams.get('m')
+    || (pathMatch ? decodeURIComponent(pathMatch[1]) : '');
   const matchName = urlObj.searchParams.get('matchName') || '';
 
   const { session, sessionId, list, isRealData } = await resolveSessionForRequest({
@@ -611,7 +638,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (urlObj.pathname === '/' || urlObj.pathname === '/index.html') {
+  if (urlObj.pathname === '/' || urlObj.pathname === '/index.html' || /^\/m\/[^/]+\/?$/i.test(urlObj.pathname)) {
     try {
       const { html, redirectToMushaf } = await renderPreviewPage(urlObj);
       if (redirectToMushaf) {

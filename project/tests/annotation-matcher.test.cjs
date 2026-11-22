@@ -153,6 +153,8 @@ test('publishAudioSessionToCloud retains at most 3 newest sessions per student a
   }, { maxSessionsPerStudent: 3, requestImpl: mockRequest });
 
   assert.equal(res.success, true);
+  assert.match(res.sessionId, /^[a-z0-9]{6}$/);
+  assert.equal(res.url, `https://qm7.vercel.app/m/${res.sessionId}`);
   assert.equal(res.prunedCount, 1);
   assert.equal(store['/audioMushafSessions/old1.json'], undefined);
   assert.ok(store['/audioMushafSessions/old2.json']);
