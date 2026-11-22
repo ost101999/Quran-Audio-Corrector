@@ -35,8 +35,6 @@ public class WinPdfHelper {
 $uia = [System.Windows.Automation.AutomationElement]
 $root = $uia::RootElement
 $tabCond = New-Object System.Windows.Automation.PropertyCondition($uia::ControlTypeProperty, [System.Windows.Automation.ControlType]::TabItem)
-$listCond = New-Object System.Windows.Automation.PropertyCondition($uia::ControlTypeProperty, [System.Windows.Automation.ControlType]::ListItem)
-$selCond = New-Object System.Windows.Automation.OrCondition($tabCond, $listCond)
 
 Write-Output '{"ready":true}'
 [Console]::Out.Flush()
@@ -56,10 +54,10 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
     foreach ($w in $wins) {
       $wName = $w.Current.Name
       $wClass = $w.Current.ClassName
-      if ($wName -match 'Xodo|Acrobat|\.pdf' -or $wClass -eq 'ApplicationFrameWindow') {
+      if ($wName -match 'Xodo|Acrobat|\.pdf') {
         $xodoWinNames.Add("$wClass|$wName")
-        if ($wName -match 'Xodo' -or $wClass -eq 'ApplicationFrameWindow') {
-          $items = $w.FindAll([System.Windows.Automation.TreeScope]::Descendants, $selCond)
+        if ($wName -match 'Xodo') {
+          $items = $w.FindAll([System.Windows.Automation.TreeScope]::Descendants, $tabCond)
           foreach ($it in $items) {
             $n = $it.Current.Name
             if (-not [string]::IsNullOrWhiteSpace($n)) {

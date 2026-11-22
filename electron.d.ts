@@ -17,7 +17,7 @@ declare global {
       }>;
       openOutputFolder: () => Promise<{ ok: boolean }>;
       loadOrCreateSession: (payload: { studentId?: string; studentName?: string; sourcePdfPath?: string; dateStr?: string }) => Promise<any>;
-      addClip: (payload: { sessionKey: string; audioBytes: number[]; ext?: string; startedAt: number; endedAt: number; durationMs: number }) => Promise<any>;
+      addClip: (payload: { sessionKey: string; audioBytes: Uint8Array | number[]; ext?: string; startedAt: number; endedAt: number; durationMs: number }) => Promise<any>;
       removeClip: (payload: { sessionKey: string; clipId?: string | null }) => Promise<any>;
       redoClip: (payload: { sessionKey: string }) => Promise<any>;
       updatePin: (payload: { sessionKey: string; clipId: string; pdfPage: number; xPercent: number; yPercent: number }) => Promise<any>;

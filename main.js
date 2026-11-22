@@ -136,11 +136,7 @@ function runExec(cmd, args, opts = {}) {
 
 async function detectActivePdfApp() {
     if (process.platform === 'win32') {
-        const [uiaState, xodoTask] = await Promise.all([
-            queryWinDesktopPdfState(1200),
-            runExec('tasklist', ['/FI', 'IMAGENAME eq Xodo.exe', '/NH'], { timeout: 2000 }),
-        ]);
-
+        const uiaState = await queryWinDesktopPdfState(1000);
         const openDocs = readXodoOpenDocuments();
         const findOpenDocByTitle = (rawLabel) => {
             const clean = String(rawLabel || '').replace(/\.pdf$/i, '').trim().toLowerCase();
@@ -171,7 +167,8 @@ async function detectActivePdfApp() {
             }
         }
 
-        if (/Xodo\.exe/i.test(xodoTask.stdout) && openDocs.length > 0) {
+        const hasXodoHint = (uiaState?.xodoWinNames?.length || 0) > 0;
+        if (openDocs.length > 0 && (hasXodoHint || /Xodo\.exe/i.test((await runExec('tasklist', ['/FI', 'IMAGENAME eq Xodo.exe', '/NH'], { timeout: 1500 })).stdout))) {
             for (const doc of openDocs) {
                 const candidateMatch = matchWindowTitleToStudent(doc.fileName, doc.originalPath || doc.openCopyPath);
                 if (candidateMatch) {
@@ -331,6 +328,7 @@ function createWindow() {
             preload: path.join(__dirname, 'preload.js'),
             contextIsolation: true,
             nodeIntegration: false,
+            backgroundThrottling: false,
             additionalArguments: [`--hud-mode=${initialMode}`],
         },
     });

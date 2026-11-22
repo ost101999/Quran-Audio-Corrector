@@ -167,8 +167,14 @@ export class Mp3VoiceRecorder {
     return this.activeMic;
   }
 
+  isReady(): boolean {
+    return Boolean(this.stream && this.stream.active && this.ctx && this.ctx.state === 'running' && this.processor);
+  }
+
   async start() {
-    await this.warmUp();
+    if (!this.isReady()) {
+      await this.warmUp();
+    }
     this.chunks = [];
     this.startedAt = Date.now();
     this.collecting = true;
@@ -176,7 +182,7 @@ export class Mp3VoiceRecorder {
 
   async stop(): Promise<{
     silent: boolean;
-    bytes: number[];
+    bytes: Uint8Array | number[];
     startedAt: number;
     endedAt: number;
     durationMs: number;
@@ -236,7 +242,7 @@ export class Mp3VoiceRecorder {
 
     return {
       silent: false,
-      bytes: Array.from(out),
+      bytes: out,
       startedAt: this.startedAt,
       endedAt,
       durationMs: Math.max(200, endedAt - this.startedAt),

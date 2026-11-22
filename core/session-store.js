@@ -266,20 +266,38 @@ function readClipAudioDataUrl(sessionKey, fileName, rootDir = SESSIONS_ROOT_DIR)
     return `data:${mime};base64,${fs.readFileSync(filePath).toString('base64')}`;
 }
 
+let cachedStudents = { path: '', mtimeMs: -1, checkedAt: 0, list: [] };
+let cachedShortcuts = { path: '', mtimeMs: -1, checkedAt: 0, list: [] };
+
 function getQuranTrackerStudents() {
     const appData = process.platform === 'darwin'
         ? path.join(os.homedir(), 'Library', 'Application Support', 'quran-classes-tracker', 'data.json')
         : path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'quran-classes-tracker', 'data.json');
+    const now = Date.now();
+    if (cachedStudents.path === appData && (now - cachedStudents.checkedAt) < 4000) {
+        return cachedStudents.list;
+    }
     try {
         if (!fs.existsSync(appData)) return [];
+        const st = fs.statSync(appData);
+        if (cachedStudents.path === appData && cachedStudents.mtimeMs === st.mtimeMs) {
+            cachedStudents.checkedAt = now;
+            return cachedStudents.list;
+        }
         const raw = JSON.parse(fs.readFileSync(appData, 'utf8'));
-        return Array.isArray(raw.students) ? raw.students.filter(s => s && !s.deletedAt) : [];
+        const list = Array.isArray(raw.students) ? raw.students.filter(s => s && !s.deletedAt) : [];
+        cachedStudents = { path: appData, mtimeMs: st.mtimeMs, checkedAt: now, list };
+        return list;
     } catch {
-        return [];
+        return cachedStudents.list || [];
     }
 }
 
 function readShortcutMushafs() {
+    const now = Date.now();
+    if (cachedShortcuts.path && (now - cachedShortcuts.checkedAt) < 8000) {
+        return cachedShortcuts.list;
+    }
     const macDrive = path.join(os.homedir(), 'Library', 'CloudStorage', 'GoogleDrive-ost101999@gmail.com');
     const candidates = process.platform === 'darwin'
         ? [
@@ -303,6 +321,10 @@ function readShortcutMushafs() {
         } catch { /* skip */ }
     }
     if (!iniPath) return [];
+    if (cachedShortcuts.path === iniPath && cachedShortcuts.mtimeMs === bestTime) {
+        cachedShortcuts.checkedAt = now;
+        return cachedShortcuts.list;
+    }
 
     const toLocal = (rawPath) => {
         if (process.platform !== 'darwin') return rawPath;
@@ -336,6 +358,7 @@ function readShortcutMushafs() {
             parentFolder,
         });
     }
+    cachedShortcuts = { path: iniPath, mtimeMs: bestTime, checkedAt: now, list: entries };
     return entries;
 }
 

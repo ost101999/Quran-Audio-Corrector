@@ -84,6 +84,7 @@ export default function App() {
   const audioPlayerRef = useRef<HTMLAudioElement | null>(null);
   const modeRef = useRef<HudMode>(mode);
   modeRef.current = mode;
+  const togglingRecordRef = useRef(false);
 
   const flashStatus = useCallback((msg: string, ms = 3200) => {
     setStatusMsg(msg);
@@ -199,7 +200,7 @@ export default function App() {
       } catch { /* ignore */ }
     };
     void poll();
-    timer = window.setInterval(poll, 2600);
+    timer = window.setInterval(poll, 3800);
     return () => { if (timer) window.clearInterval(timer); };
   }, [manualLock, isRecording, syncSessionForStudent]);
 
@@ -214,63 +215,80 @@ export default function App() {
   }, [isRecording]);
 
   const toggleRecording = useCallback(async () => {
-    if (busy || !window.correctorAPI) return;
-    if (!isRecording) {
+    if (busy || togglingRecordRef.current || !window.correctorAPI) return;
+    togglingRecordRef.current = true;
+    try {
+      if (!isRecording) {
+        try {
+          if (!recorderRef.current) recorderRef.current = new Mp3VoiceRecorder();
+          const readyFast = recorderRef.current.isReady();
+          if (readyFast) {
+            setIsRecording(true);
+            playSoftTone(1050, 80, 0.06);
+            flashStatus('جاري التسجيل... (F20 للإيقاف)');
+            await recorderRef.current.start();
+          } else {
+            flashStatus('جاري تجهيز المايكروفون...');
+            await recorderRef.current.start();
+            setIsRecording(true);
+            playSoftTone(1050, 80, 0.06);
+            flashStatus('جاري التسجيل... (F20 للإيقاف)');
+          }
+          if (!session) {
+            void window.correctorAPI.loadOrCreateSession({
+              studentId: selectedStudent.id,
+              studentName: selectedStudent.name === 'في انتظار فتح مصحف...' ? 'طالب' : selectedStudent.name,
+              sourcePdfPath: selectedStudent.sourcePdfPath,
+            }).then(setSession).catch(() => {});
+          }
+        } catch {
+          setIsRecording(false);
+          playSoftTone(300, 220, 0.07);
+          flashStatus('تعذر فتح الميكروفون');
+        }
+        return;
+      }
+
+      // Stop recording with immediate visual & audio feedback before MP3 encode/disk save
+      const rec = recorderRef.current;
+      setIsRecording(false);
+      if (!rec) return;
+      flashStatus('جاري حفظ التصحيح...', 2500);
+      await new Promise<void>(resolve => window.setTimeout(resolve, 0));
+
       try {
-        if (!recorderRef.current) recorderRef.current = new Mp3VoiceRecorder();
-        await recorderRef.current.start();
-        setIsRecording(true);
-        playSoftTone(1050, 90, 0.06);
-        flashStatus('جاري التسجيل... (F20 للإيقاف)');
-        if (!session) {
-          void window.correctorAPI.loadOrCreateSession({
+        const result = await rec.stop();
+        if (result.silent || result.bytes.length === 0) {
+          playSoftTone(260, 240, 0.06);
+          flashStatus('تم تجاهل تسجيل صامت');
+          return;
+        }
+        let targetSession = session;
+        if (!targetSession) {
+          targetSession = await window.correctorAPI.loadOrCreateSession({
             studentId: selectedStudent.id,
             studentName: selectedStudent.name === 'في انتظار فتح مصحف...' ? 'طالب' : selectedStudent.name,
             sourcePdfPath: selectedStudent.sourcePdfPath,
-          }).then(setSession).catch(() => {});
+          });
         }
-      } catch {
-        playSoftTone(300, 220, 0.07);
-        flashStatus('تعذر فتح الميكروفون');
-      }
-      return;
-    }
-
-    // Stop recording
-    const rec = recorderRef.current;
-    setIsRecording(false);
-    if (!rec) return;
-
-    try {
-      const result = await rec.stop();
-      if (result.silent || result.bytes.length === 0) {
-        playSoftTone(260, 240, 0.06);
-        flashStatus('تم تجاهل تسجيل صامت');
-        return;
-      }
-      let targetSession = session;
-      if (!targetSession) {
-        targetSession = await window.correctorAPI.loadOrCreateSession({
-          studentId: selectedStudent.id,
-          studentName: selectedStudent.name === 'في انتظار فتح مصحف...' ? 'طالب' : selectedStudent.name,
-          sourcePdfPath: selectedStudent.sourcePdfPath,
+        if (!targetSession) return;
+        const saved = await window.correctorAPI.addClip({
+          sessionKey: targetSession.sessionKey,
+          audioBytes: result.bytes,
+          ext: 'mp3',
+          startedAt: result.startedAt,
+          endedAt: result.endedAt,
+          durationMs: result.durationMs,
         });
+        setSession(saved.session);
+        playSoftTone(700, 100, 0.06);
+        flashStatus(`تم حفظ التصحيح (${saved.session.clips.length})`);
+      } catch {
+        playSoftTone(260, 240, 0.06);
+        flashStatus('تعذر حفظ المقطع الصوتي');
       }
-      if (!targetSession) return;
-      const saved = await window.correctorAPI.addClip({
-        sessionKey: targetSession.sessionKey,
-        audioBytes: result.bytes,
-        ext: 'mp3',
-        startedAt: result.startedAt,
-        endedAt: result.endedAt,
-        durationMs: result.durationMs,
-      });
-      setSession(saved.session);
-      playSoftTone(700, 100, 0.06);
-      flashStatus(`تم حفظ التصحيح (${saved.session.clips.length})`);
-    } catch {
-      playSoftTone(260, 240, 0.06);
-      flashStatus('تعذر حفظ المقطع الصوتي');
+    } finally {
+      togglingRecordRef.current = false;
     }
   }, [busy, isRecording, session, selectedStudent, flashStatus]);
 
@@ -378,16 +396,30 @@ export default function App() {
     }
   }, [session, isRecording, toggleRecording, selectedStudent.name, flashStatus, openReviewModal]);
 
-  // Listen to global shortcuts F17 / F22 / F21 / F20
+  const shortcutHandlersRef = useRef({
+    toggleRecording,
+    handleUndoLast,
+    handleRedoLast,
+    handleExport,
+  });
+  shortcutHandlersRef.current = {
+    toggleRecording,
+    handleUndoLast,
+    handleRedoLast,
+    handleExport,
+  };
+
+  // Listen to global shortcuts F17 / F22 / F21 / F20 once without re-binding churn
   useEffect(() => {
     if (!window.correctorAPI) return;
     return window.correctorAPI.onShortcut((action) => {
-      if (action === 'toggle-record') void toggleRecording();
-      else if (action === 'undo-last') void handleUndoLast();
-      else if (action === 'redo-last') void handleRedoLast();
-      else if (action === 'finish-export') void handleExport('web_link');
+      const h = shortcutHandlersRef.current;
+      if (action === 'toggle-record') void h.toggleRecording();
+      else if (action === 'undo-last') void h.handleUndoLast();
+      else if (action === 'redo-last') void h.handleRedoLast();
+      else if (action === 'finish-export') void h.handleExport('web_link');
     });
-  }, [toggleRecording, handleUndoLast, handleRedoLast, handleExport]);
+  }, []);
 
   const playClipAudio = async (clip: { id: string; fileName: string }) => {
     if (!session || !window.correctorAPI) return;
