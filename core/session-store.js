@@ -118,12 +118,19 @@ function loadOrCreateSession({
     return saveSession(created, rootDir);
 }
 
-function findSessionForStudent({ studentId, studentName, dateStr = getTodayDateStr(), rootDir = SESSIONS_ROOT_DIR } = {}) {
+function shiftDateStr(dateStr, deltaDays) {
+    const m = String(dateStr || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!m) return '';
+    const d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]) + deltaDays));
+    return d.toISOString().slice(0, 10);
+}
+
+function findSessionForStudentOnDate({ studentId, studentName, dateStr, rootDir }) {
     const byNameKey = getStudentSessionKey(studentName, studentId, dateStr);
     const exact = loadSession(byNameKey, rootDir);
     if (exact && Array.isArray(exact.clips) && exact.clips.length > 0) return exact;
-
     if (!fs.existsSync(rootDir)) return exact;
+
     const normTarget = normalizeText(studentName);
     let bestMatch = exact;
     for (const entry of fs.readdirSync(rootDir, { withFileTypes: true })) {
@@ -140,6 +147,24 @@ function findSessionForStudent({ studentId, studentName, dateStr = getTodayDateS
         }
     }
     return bestMatch;
+}
+
+function findSessionForStudent({ studentId, studentName, dateStr = getTodayDateStr(), rootDir = SESSIONS_ROOT_DIR } = {}) {
+    const todayReal = getTodayDateStr();
+    const candidateDates = [];
+    const pushDate = (d) => { if (d && !candidateDates.includes(d)) candidateDates.push(d); };
+    pushDate(dateStr);
+    pushDate(shiftDateStr(dateStr, 1));
+    pushDate(shiftDateStr(dateStr, -1));
+    pushDate(todayReal);
+
+    let firstMatch = null;
+    for (const d of candidateDates) {
+        const found = findSessionForStudentOnDate({ studentId, studentName, dateStr: d, rootDir });
+        if (!firstMatch && found) firstMatch = found;
+        if (found && Array.isArray(found.clips) && found.clips.length > 0) return found;
+    }
+    return firstMatch;
 }
 
 function addAudioClipToSession(sessionKey, { buffer, ext = 'mp3', startedAt, endedAt, durationMs }, rootDir = SESSIONS_ROOT_DIR) {

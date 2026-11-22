@@ -261,3 +261,35 @@ test('unmatched new yellow highlights are detected and recolored to green [0, 1,
   const merged = mergeReportAndAudioSections({ reportSections: [], markers, unmatchedNewAnnotations });
   assert.deepEqual(merged.allPdfPages, [1, 2]);
 });
+
+test('findSessionForStudent falls back across day transition or today when calendar date differs from recording date', () => {
+  const os = require('node:os');
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const {
+    loadOrCreateSession,
+    addAudioClipToSession,
+    findSessionForStudent,
+    getTodayDateStr,
+  } = require('../core/session-store');
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qac-find-'));
+  try {
+    const todayStr = getTodayDateStr();
+    const sess = loadOrCreateSession({ studentId: 'st9', studentName: 'محمد علي', dateStr: todayStr, rootDir: tmpDir });
+    addAudioClipToSession(sess.sessionKey, {
+      buffer: Buffer.from('FAKE_MP3'),
+      ext: 'mp3',
+      startedAt: Date.now() - 2000,
+      endedAt: Date.now(),
+      durationMs: 2000,
+    }, tmpDir);
+
+    // Calendar viewing a past day (e.g. 2026-11-16) should still locate today's active clips
+    const found = findSessionForStudent({ studentId: 'st9', studentName: 'محمد علي', dateStr: '2026-11-16', rootDir: tmpDir });
+    assert.ok(found);
+    assert.equal(found.clips.length, 1);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
