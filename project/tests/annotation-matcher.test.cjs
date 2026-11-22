@@ -10,6 +10,7 @@ const {
   mergeReportAndAudioSections,
 } = require('../core/annotation-matcher');
 const { publishAudioSessionToCloud, buildInteractiveHtml } = require('../core/publisher');
+const { isVersionNewer } = require('../core/app-update');
 const {
   loadHudState,
   saveHudState,
@@ -308,4 +309,11 @@ test('findSessionForStudent falls back across day transition or today when calen
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
+});
+
+test('isVersionNewer compares commit-based versions properly', () => {
+  assert.equal(isVersionNewer('1.0.30', '1.0.29'), true);
+  assert.equal(isVersionNewer('1.0.29', '1.0.29'), false);
+  assert.equal(isVersionNewer('1.0.28', '1.0.29'), false);
+  assert.equal(isVersionNewer('v1.1.0', '1.0.99'), true);
 });

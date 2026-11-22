@@ -1,6 +1,7 @@
 **/node_modules/
 **/dist/
 **/dist_electron/
+project/project-meta.json
 .DS_Store
 desktop.ini
 *.tmp

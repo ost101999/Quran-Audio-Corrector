@@ -10,7 +10,8 @@
     "build": "vite build",
     "start": "node start.js",
     "test": "node --test tests/*.test.cjs",
-    "electron:build": "npm run build && electron-builder --publish never"
+    "version:current": "node build-with-version.cjs --print-version",
+    "electron:build": "npm run build && node build-with-version.cjs --publish never"
   },
   "build": {
     "appId": "com.quran.audiocorrector",
@@ -24,7 +25,8 @@
       ".icons/app-icon.*",
       "main.js",
       "preload.js",
-      "package.json"
+      "package.json",
+      "project-meta.json"
     ],
     "asarUnpack": [
       "core/win-pdf-detector.ps1",

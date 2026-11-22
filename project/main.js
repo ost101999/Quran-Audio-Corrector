@@ -1,4 +1,5 @@
-const { app, BrowserWindow, ipcMain, globalShortcut, screen, clipboard, shell, Tray, Menu, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain, globalShortcut, screen, clipboard, shell, dialog, Tray, Menu, nativeImage } = require('electron');
+const { registerAppUpdates } = require('./core/app-update');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
@@ -658,6 +659,7 @@ if (!gotSingleInstanceLock) {
         createWindow();
         createTray();
         registerShortcuts();
+        registerAppUpdates({ app, ipcMain, shell, dialog, getMainWindow: () => mainWindow });
     });
     if (process.platform !== 'win32') {
         process.on('SIGUSR1', () => {

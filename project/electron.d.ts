@@ -28,6 +28,8 @@ declare global {
       clipDataUrl: (payload: { sessionKey: string; fileName: string }) => Promise<string>;
       exportSession: (payload: { sessionKey: string; sourcePdfPath?: string; mode: 'web_link' | 'html'; language?: 'ar' | 'en'; autoSave?: boolean }) => Promise<any>;
       nativeEdit: (action: 'undo' | 'redo') => Promise<{ ok: boolean }>;
+      checkForUpdates: () => Promise<{ status: 'available' | 'up-to-date' | 'error'; current?: string; latest?: string; error?: string }>;
+      startUpdate: () => Promise<{ started: boolean }>;
       onShortcut: (cb: (action: 'toggle-record' | 'undo-last' | 'redo-last' | 'finish-export') => void) => () => void;
       onEditAction: (cb: (action: 'undo' | 'redo') => void) => () => void;
     };

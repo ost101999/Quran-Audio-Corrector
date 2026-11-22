@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowUp,
+  Bell,
   Check,
   ChevronDown,
   Eye,
@@ -12,6 +13,7 @@ import {
   Mic,
   Minimize2,
   Play,
+  RefreshCw,
   RotateCcw,
   RotateCw,
   Square,
@@ -64,6 +66,10 @@ export default function App() {
   const [audioInputs, setAudioInputs] = useState<AudioInputDevice[]>([]);
   const [activeMic, setActiveMic] = useState<AudioInputDevice | null>(null);
   const [showMicMenu, setShowMicMenu] = useState(false);
+  const [showUpdateMenu, setShowUpdateMenu] = useState(false);
+  const [updateInfo, setUpdateInfo] = useState<{ status: 'available' | 'up-to-date' | 'error'; current?: string; latest?: string } | null>(null);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [startingUpdate, setStartingUpdate] = useState(false);
 
   // Review state
   const [matchData, setMatchData] = useState<{
@@ -152,16 +158,34 @@ export default function App() {
         setShowMicMenu(false);
         return;
       }
+      if (showUpdateMenu) {
+        setShowUpdateMenu(false);
+        return;
+      }
       setMode(prev => (prev === 'pill' ? 'bar' : 'pill'));
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [showMicMenu]);
+  }, [showMicMenu, showUpdateMenu]);
 
-  // Load students list on boot
+  const checkAppUpdates = useCallback(async () => {
+    if (!window.correctorAPI?.checkForUpdates) return;
+    setCheckingUpdate(true);
+    try {
+      const res = await window.correctorAPI.checkForUpdates();
+      setUpdateInfo(res);
+    } catch {
+      setUpdateInfo(prev => ({ status: 'error', current: prev?.current }));
+    } finally {
+      setCheckingUpdate(false);
+    }
+  }, []);
+
+  // Load students list and silently check for commit-based updates on boot
   useEffect(() => {
     window.correctorAPI?.listStudents().then(setStudents).catch(() => {});
-  }, []);
+    void checkAppUpdates();
+  }, [checkAppUpdates]);
 
   // Ensure a session exists whenever selectedStudent changes
   const syncSessionForStudent = useCallback(async (info: { id: string; name: string; sourcePdfPath: string }) => {
@@ -893,6 +917,7 @@ export default function App() {
               type="button"
               disabled={isRecording}
               onClick={async () => {
+                setShowUpdateMenu(false);
                 if (!showMicMenu) {
                   try { setAudioInputs(await listAudioInputs()); } catch { /* ignore */ }
                 }
@@ -913,6 +938,29 @@ export default function App() {
             </button>
             <button
               type="button"
+              onClick={() => {
+                setShowMicMenu(false);
+                setShowUpdateMenu(v => !v);
+                void checkAppUpdates();
+              }}
+              className={`relative p-1.5 rounded-lg transition-colors ${
+                showUpdateMenu ? 'bg-indigo-500/25 text-indigo-200' : 'hover:bg-white/10 text-slate-400 hover:text-white'
+              }`}
+              title={
+                updateInfo?.status === 'available'
+                  ? `تحديث جديد متاح (${updateInfo.latest})`
+                  : updateInfo?.current
+                  ? `تحديثات البرنامج (v${updateInfo.current})`
+                  : 'تحديثات البرنامج'
+              }
+            >
+              {checkingUpdate ? <Loader2 size={13} className="animate-spin text-indigo-300" /> : <Bell size={13} />}
+              {updateInfo?.status === 'available' && (
+                <span className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-amber-400 ring-2 ring-slate-900 animate-pulse" />
+              )}
+            </button>
+            <button
+              type="button"
               onClick={() => void window.correctorAPI?.openOutputFolder()}
               className="p-1.5 rounded-lg hover:bg-white/10 text-slate-400 hover:text-white"
               title="فتح مجلد الحفظ"
@@ -921,7 +969,7 @@ export default function App() {
             </button>
             <button
               type="button"
-              onClick={() => { setShowMicMenu(false); setMode('pill'); }}
+              onClick={() => { setShowMicMenu(false); setShowUpdateMenu(false); setMode('pill'); }}
               className="p-1.5 rounded-lg hover:bg-white/10 text-slate-400 hover:text-white"
               title="تصغير لكبسولة جانبية"
             >
@@ -932,10 +980,13 @@ export default function App() {
 
         {/* Inline Mic Switcher Overlay */}
         {showMicMenu && (
-          <div className="hud-no-drag absolute inset-x-3 top-11 bottom-3 z-30 rounded-xl bg-slate-950/98 border border-white/20 shadow-2xl p-2 flex flex-col gap-1 overflow-y-auto">
-            <div className="text-[11px] font-bold text-slate-400 px-1 pb-1 border-b border-white/10 flex items-center justify-between">
+          <div
+            style={{ backgroundColor: '#0b1220' }}
+            className="hud-no-drag hud-scroll absolute inset-x-2.5 top-11 bottom-2.5 z-40 rounded-xl border border-emerald-400/25 shadow-2xl p-2 flex flex-col gap-1 overflow-y-auto"
+          >
+            <div className="text-[11px] font-bold text-slate-300 px-1 pb-1 border-b border-white/10 flex items-center justify-between shrink-0">
               <span>اختر المايكروفون</span>
-              <button type="button" onClick={() => setShowMicMenu(false)} className="text-slate-400 hover:text-white">✕</button>
+              <button type="button" onClick={() => setShowMicMenu(false)} className="text-slate-400 hover:text-white px-1">✕</button>
             </div>
             {audioInputs.map(dev => {
               const isCurrent = activeMic?.deviceId === dev.deviceId || (activeMic?.label && activeMic.label === dev.label);
@@ -951,16 +1002,76 @@ export default function App() {
                     setShowMicMenu(false);
                     flashStatus(`المايك: ${(next || dev).label}`, 2800);
                   }}
-                  className={`w-full text-right px-2 py-1.5 rounded-lg text-[11px] flex items-center justify-between gap-2 ${
-                    isCurrent ? 'bg-emerald-600/30 text-emerald-200 font-bold' : 'hover:bg-white/10 text-slate-200'
+                  className={`w-full text-left px-2.5 py-1.5 rounded-lg text-[11px] flex items-center justify-between gap-2 shrink-0 ${
+                    isCurrent ? 'bg-emerald-600/35 text-emerald-100 font-bold border border-emerald-400/30' : 'hover:bg-white/10 text-slate-200'
                   }`}
                   title={dev.label}
                 >
-                  <span className="truncate">{dev.label}</span>
+                  <span className="truncate flex-1" dir="ltr">{dev.label}</span>
                   {isCurrent && <Check size={12} className="text-emerald-400 shrink-0" />}
                 </button>
               );
             })}
+          </div>
+        )}
+
+        {/* Inline Commit-Based Update Overlay */}
+        {showUpdateMenu && (
+          <div
+            style={{ backgroundColor: '#0b1220' }}
+            className="hud-no-drag absolute inset-x-2.5 top-11 bottom-2.5 z-40 rounded-xl border border-indigo-400/30 shadow-2xl p-2.5 flex flex-col justify-between"
+          >
+            <div className="text-[11px] font-bold text-slate-200 pb-1 border-b border-white/10 flex items-center justify-between">
+              <span className="flex items-center gap-1.5">
+                <span>تحديثات البرنامج</span>
+                {updateInfo?.current && (
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-white/10 text-slate-300 font-mono" dir="ltr">
+                    v{updateInfo.current}
+                  </span>
+                )}
+              </span>
+              <button type="button" onClick={() => setShowUpdateMenu(false)} className="text-slate-400 hover:text-white px-1">✕</button>
+            </div>
+            <div className="flex items-center justify-between gap-2 my-auto">
+              <span className="text-[11px] text-slate-300 leading-tight">
+                {checkingUpdate
+                  ? 'جارٍ البحث عن تحديثات...'
+                  : updateInfo?.status === 'available'
+                  ? `تحديث جديد متاح (v${updateInfo.latest})`
+                  : updateInfo?.status === 'up-to-date'
+                  ? 'البرنامج محدّث لآخر إصدار.'
+                  : 'تعذر التحقق من GitHub حالياً.'}
+              </span>
+              <div className="flex items-center gap-1.5 shrink-0">
+                <button
+                  type="button"
+                  disabled={checkingUpdate || startingUpdate}
+                  onClick={() => void checkAppUpdates()}
+                  className="p-1.5 rounded-lg bg-white/10 hover:bg-white/20 disabled:opacity-40 text-slate-200"
+                  title="إعادة فحص التحديثات"
+                >
+                  <RefreshCw size={12} className={checkingUpdate ? 'animate-spin' : ''} />
+                </button>
+                {updateInfo?.status === 'available' && !checkingUpdate && (
+                  <button
+                    type="button"
+                    disabled={startingUpdate}
+                    onClick={async () => {
+                      setStartingUpdate(true);
+                      try {
+                        const res = await window.correctorAPI?.startUpdate?.();
+                        if (!res?.started) flashStatus('تعذر تشغيل التحديث', 3000);
+                      } finally {
+                        setStartingUpdate(false);
+                      }
+                    }}
+                    className="px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white text-[11px] font-bold"
+                  >
+                    {startingUpdate ? 'جارٍ التشغيل...' : 'تحديث'}
+                  </button>
+                )}
+              </div>
+            </div>
           </div>
         )}
 

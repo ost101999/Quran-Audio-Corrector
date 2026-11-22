@@ -25,6 +25,8 @@ contextBridge.exposeInMainWorld('correctorAPI', {
     clipDataUrl: (payload) => ipcRenderer.invoke('session:clip-data-url', payload),
     exportSession: (payload) => ipcRenderer.invoke('session:export', payload),
     nativeEdit: (action) => ipcRenderer.invoke('hud:native-edit', action),
+    checkForUpdates: () => ipcRenderer.invoke('app-update:check'),
+    startUpdate: () => ipcRenderer.invoke('app-update:start'),
     onShortcut: (cb) => {
         const handler = (_event, action) => cb(action);
         ipcRenderer.on('hud-shortcut', handler);
