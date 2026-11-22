@@ -1,6 +1,7 @@
 const http = require('node:http');
 const https = require('node:https');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 
@@ -10,12 +11,15 @@ const BASE_URL = `http://localhost:${PORT}`;
 const CORE_DIR = path.join(__dirname, 'core');
 const WEB_APP_HTML_PATH = 'C:\\My App\\Quran Classes Tracker\\student-web-app\\index.html';
 const FIREBASE_BASE_URL = 'https://quran-classes-tracker-default-rtdb.firebaseio.com';
+const ELECTRON_EXE = path.join(__dirname, 'node_modules', 'electron', 'dist', 'electron.exe');
 const NO_OPEN = process.argv.includes('--no-open');
 
 const sseClients = new Set();
-const sessionCache = new Map();
+const cloudSessionCache = new Map();
+const localRenderCache = new Map();
 let cachedIndexList = null;
 let cachedIndexAt = 0;
+let lastKnownNewestCloudId = '';
 
 function parseSessionIdTimestamp(sessionId) {
   const parts = String(sessionId || '').split('_');
@@ -56,9 +60,19 @@ function fetchJson(urlString, timeoutMs = 15000) {
   });
 }
 
+function loadSessionStoreFresh() {
+  const storePath = path.join(CORE_DIR, 'session-store.js');
+  for (const key of Object.keys(require.cache)) {
+    if (key.startsWith(CORE_DIR + path.sep) || key === CORE_DIR) {
+      delete require.cache[key];
+    }
+  }
+  return require(storePath);
+}
+
 function loadLocalStudentNameMap() {
   try {
-    const store = require('./core/session-store');
+    const store = loadSessionStoreFresh();
     const students = typeof store.getQuranTrackerStudents === 'function'
       ? store.getQuranTrackerStudents()
       : [];
@@ -74,9 +88,9 @@ function loadLocalStudentNameMap() {
   }
 }
 
-async function listRecentRealSessions(forceRefresh = false) {
+async function listRecentCloudSessions(forceRefresh = false) {
   const now = Date.now();
-  if (!forceRefresh && cachedIndexList && (now - cachedIndexAt) < 15000) {
+  if (!forceRefresh && cachedIndexList && (now - cachedIndexAt) < 12000) {
     return cachedIndexList;
   }
   const shallow = await fetchJson(`${FIREBASE_BASE_URL}/audioMushafSessions.json?shallow=true`, 10000);
@@ -88,7 +102,7 @@ async function listRecentRealSessions(forceRefresh = false) {
     .slice(0, 14)
     .map(item => {
       const knownName = nameMap.get(String(item.studentKey).toLowerCase());
-      const cached = sessionCache.get(item.id);
+      const cached = cloudSessionCache.get(item.id);
       const displayName = cached?.studentName || knownName || item.studentKey;
       const timeLabel = item.createdAt
         ? new Date(item.createdAt).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })
@@ -98,27 +112,28 @@ async function listRecentRealSessions(forceRefresh = false) {
         label: [displayName, item.dateStr, timeLabel].filter(Boolean).join(' • '),
       };
     });
+  if (items[0]?.id) lastKnownNewestCloudId = items[0].id;
   cachedIndexList = items;
   cachedIndexAt = now;
   return items;
 }
 
-async function getRealSessionData(requestedId = '', forceRefresh = false) {
+async function getCloudSessionData(requestedId = '', forceRefresh = false) {
   if (forceRefresh) {
-    sessionCache.clear();
+    cloudSessionCache.clear();
     cachedIndexList = null;
   }
-  const list = await listRecentRealSessions(forceRefresh);
-  if (list.length === 0) return { session: null, list: [] };
+  const list = await listRecentCloudSessions(forceRefresh);
+  if (list.length === 0) return { session: null, sessionId: '', list: [] };
   const targetId = requestedId && list.some(x => x.id === requestedId)
     ? requestedId
     : list[0].id;
 
-  let data = !forceRefresh ? sessionCache.get(targetId) : null;
+  let data = !forceRefresh ? cloudSessionCache.get(targetId) : null;
   if (!data) {
     data = await fetchJson(`${FIREBASE_BASE_URL}/audioMushafSessions/${encodeURIComponent(targetId)}.json`, 20000);
     if (data && typeof data === 'object') {
-      sessionCache.set(targetId, data);
+      cloudSessionCache.set(targetId, data);
       const match = list.find(x => x.id === targetId);
       if (match && data.studentName) {
         const timeLabel = match.createdAt
@@ -131,32 +146,97 @@ async function getRealSessionData(requestedId = '', forceRefresh = false) {
   return { session: data || null, sessionId: targetId, list };
 }
 
-function createSoftChimeWavDataUrl(freqHz = 523.25, durationSec = 0.45) {
-  const sampleRate = 22050;
-  const numSamples = Math.floor(sampleRate * durationSec);
-  const dataSize = numSamples * 2;
-  const buf = Buffer.alloc(44 + dataSize);
-  buf.write('RIFF', 0);
-  buf.writeUInt32LE(36 + dataSize, 4);
-  buf.write('WAVE', 8);
-  buf.write('fmt ', 12);
-  buf.writeUInt32LE(16, 16);
-  buf.writeUInt16LE(1, 20);
-  buf.writeUInt16LE(1, 22);
-  buf.writeUInt32LE(sampleRate, 24);
-  buf.writeUInt32LE(sampleRate * 2, 28);
-  buf.writeUInt16LE(2, 32);
-  buf.writeUInt16LE(16, 34);
-  buf.write('data', 36);
-  buf.writeUInt32LE(dataSize, 40);
-  for (let i = 0; i < numSamples; i++) {
-    const t = i / sampleRate;
-    const attack = Math.min(1, t / 0.02);
-    const decay = Math.exp(-5.5 * t);
-    const sample = Math.sin(2 * Math.PI * freqHz * t) * 0.25 * attack * decay;
-    buf.writeInt16LE(Math.round(sample * 32767), 44 + i * 2);
+function listLocalPdfSessions() {
+  const store = loadSessionStoreFresh();
+  const rootDir = store.SESSIONS_ROOT_DIR;
+  if (!rootDir || !fs.existsSync(rootDir)) return [];
+  const entries = [];
+  for (const d of fs.readdirSync(rootDir, { withFileTypes: true })) {
+    if (!d.isDirectory()) continue;
+    const metaPath = path.join(rootDir, d.name, 'session.json');
+    if (!fs.existsSync(metaPath)) continue;
+    try {
+      const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+      if (!meta?.sourcePdfPath || !fs.existsSync(meta.sourcePdfPath)) continue;
+      const st = fs.statSync(metaPath);
+      const clipsCount = Array.isArray(meta.clips) ? meta.clips.length : 0;
+      entries.push({
+        id: meta.sessionKey || d.name,
+        metaPath,
+        studentName: meta.studentName || 'طالب',
+        dateStr: meta.dateStr || '',
+        clipsCount,
+        sortScore: (clipsCount > 0 ? 1e14 : 0) + (meta.lastRecordedAt || st.mtimeMs || 0),
+        label: `${meta.studentName || 'طالب'} • PDF محلي (${clipsCount} صوت)`,
+      });
+    } catch { /* skip broken */ }
   }
-  return `data:audio/wav;base64,${buf.toString('base64')}`;
+  entries.sort((a, b) => b.sortScore - a.sortScore);
+  return entries.slice(0, 10);
+}
+
+async function runLiveLocalPdfWorker(sessionItem, forceRefresh = false) {
+  if (!sessionItem) throw new Error('لا توجد جلسة محلية تحتوي على ملف PDF.');
+  if (!forceRefresh && localRenderCache.has(sessionItem.id)) {
+    return localRenderCache.get(sessionItem.id);
+  }
+
+  // Try to reuse report section specs (including verseSpan) from the matching student's cloud session
+  let reportSections = [];
+  try {
+    const cloudList = await listRecentCloudSessions(false);
+    const normTarget = String(sessionItem.studentName || '').trim().toLowerCase();
+    const matchingCloud = cloudList.find(c => c.label.toLowerCase().includes(normTarget));
+    if (matchingCloud) {
+      const cloudRes = await getCloudSessionData(matchingCloud.id, false);
+      if (Array.isArray(cloudRes?.session?.sections)) {
+        reportSections = cloudRes.session.sections.map(sec => ({
+          key: sec.key,
+          group: sec.group,
+          groupTitleAr: sec.groupTitleAr,
+          groupTitleEn: sec.groupTitleEn,
+          titleAr: sec.titleAr,
+          titleEn: sec.titleEn,
+          summaryAr: sec.summaryAr,
+          summaryEn: sec.summaryEn,
+          startPage: sec.startPage,
+          endPage: sec.endPage,
+          verseSpan: sec.verseSpan || null,
+          pages: Array.isArray(sec.pages) ? sec.pages.map(p => ({ pdfPage: p.pdfPage })) : [],
+        }));
+      }
+    }
+  } catch { /* fallback cleanly to PDF annotations/page 1 */ }
+
+  const tmpBase = path.join(os.tmpdir(), `dev_pdf_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`);
+  const outJsonPath = `${tmpBase}_out.json`;
+  const sectionsJsonPath = `${tmpBase}_sec.json`;
+  fs.writeFileSync(sectionsJsonPath, JSON.stringify(reportSections), 'utf8');
+
+  try {
+    await new Promise((resolve, reject) => {
+      const childEnv = { ...process.env };
+      delete childEnv.ELECTRON_RUN_AS_NODE;
+      delete childEnv.VITE_DEV_SERVER_URL;
+      const child = spawn(
+        ELECTRON_EXE,
+        [path.join(__dirname, 'dev-pdf-worker.js'), sessionItem.metaPath, outJsonPath, sectionsJsonPath],
+        { cwd: __dirname, env: childEnv, windowsHide: true, stdio: 'ignore' }
+      );
+      child.on('error', reject);
+      child.on('exit', (code) => {
+        if (code === 0 && fs.existsSync(outJsonPath)) resolve();
+        else reject(new Error(`تعذرت معالجة PDF محلياً (كود ${code})`));
+      });
+    });
+    const rendered = JSON.parse(fs.readFileSync(outJsonPath, 'utf8'));
+    if (rendered?.error) throw new Error(rendered.error);
+    localRenderCache.set(sessionItem.id, rendered);
+    return rendered;
+  } finally {
+    try { if (fs.existsSync(outJsonPath)) fs.unlinkSync(outJsonPath); } catch { /* ignore */ }
+    try { if (fs.existsSync(sectionsJsonPath)) fs.unlinkSync(sectionsJsonPath); } catch { /* ignore */ }
+  }
 }
 
 function escapeHtml(str) {
@@ -168,37 +248,29 @@ function escapeHtml(str) {
 }
 
 function buildFallbackSampleData() {
-  const audio1 = createSoftChimeWavDataUrl(523.25, 0.45);
   return {
-    studentName: 'معاينة احتياطية (غير متصل بالسحابة)',
+    studentName: 'معاينة احتياطية (غير متصل)',
     dateStr: new Date().toLocaleDateString('en-CA'),
     language: 'ar',
     sections: [
       {
         key: 'new',
-        group: 'homework',
-        groupTitleAr: 'الدرس القادم',
-        groupTitleEn: 'Next Lesson',
         titleAr: 'الدرس القادم: الحفظ الجديد',
         titleEn: 'New Hifz',
         summaryAr: 'ص ٥٨٢',
         summaryEn: 'p. 582',
-        pages: [{ pdfPage: 582, imageDataUrl: '', markers: [{ id: 'demo_1', xPercent: 50, yPercent: 40, durationMs: 1200, audioDataUrl: audio1 }] }],
+        pages: [{ pdfPage: 582, imageDataUrl: '', markers: [] }],
       },
     ],
   };
 }
 
 function loadPublisherFresh() {
-  for (const key of Object.keys(require.cache)) {
-    if (key.startsWith(CORE_DIR + path.sep) || key === CORE_DIR) {
-      delete require.cache[key];
-    }
-  }
+  loadSessionStoreFresh();
   return require('./core/publisher');
 }
 
-function buildDevOverlaySnippet({ mode, langPref, sessionId, sessionsList, isRealData, clean }) {
+function buildDevOverlaySnippet({ source, mode, langPref, sessionId, sessionsList, isRealData, clean }) {
   const reloadScript = `
 <script>
 (function() {
@@ -213,16 +285,20 @@ function buildDevOverlaySnippet({ mode, langPref, sessionId, sessionsList, isRea
   if (clean) return reloadScript;
 
   const hasWebApp = fs.existsSync(WEB_APP_HTML_PATH);
+  const nextSource = source === 'local' ? 'cloud' : 'local';
   const nextMode = mode === 'web' ? 'html' : 'web';
   const nextLang = langPref === 'ar' ? 'en' : langPref === 'en' ? 'auto' : 'ar';
   const langBtnLabel = langPref === 'ar' ? 'اللغة: عربي' : langPref === 'en' ? 'Lang: EN' : 'لغة الجلسة';
 
   const makeUrl = (patch = {}) => {
     const p = new URLSearchParams();
+    const targetSource = patch.source ?? source;
     const targetMode = patch.mode ?? mode;
-    const targetSession = patch.sessionId ?? sessionId;
+    const targetSession = patch.sessionId !== undefined ? patch.sessionId : (targetSource === source ? sessionId : '');
     const targetLang = patch.lang ?? langPref;
-    if (targetMode === 'web' && targetSession) p.set('mushaf', targetSession);
+    const mushafId = targetSession || 'live_local';
+    if (targetMode === 'web') p.set('mushaf', mushafId);
+    p.set('source', targetSource);
     p.set('mode', targetMode);
     if (targetSession) p.set('session', targetSession);
     if (targetLang && targetLang !== 'auto') p.set('lang', targetLang);
@@ -250,7 +326,7 @@ function buildDevOverlaySnippet({ mode, langPref, sessionId, sessionsList, isRea
     border-radius: 999px;
     background: rgba(2, 6, 23, 0.92);
     backdrop-filter: blur(12px);
-    border: 1px solid ${isRealData ? 'rgba(52, 211, 153, 0.45)' : 'rgba(251, 191, 36, 0.45)'};
+    border: 1px solid ${source === 'local' ? 'rgba(167, 139, 250, 0.55)' : isRealData ? 'rgba(52, 211, 153, 0.45)' : 'rgba(251, 191, 36, 0.45)'};
     box-shadow: 0 12px 30px rgba(0, 0, 0, 0.5);
     color: #e2e8f0;
     font-family: "Segoe UI", Tahoma, sans-serif;
@@ -261,8 +337,8 @@ function buildDevOverlaySnippet({ mode, langPref, sessionId, sessionsList, isRea
     width: 8px;
     height: 8px;
     border-radius: 999px;
-    background: ${isRealData ? '#10b981' : '#f59e0b'};
-    box-shadow: 0 0 8px ${isRealData ? '#10b981' : '#f59e0b'};
+    background: ${source === 'local' ? '#a78bfa' : isRealData ? '#10b981' : '#f59e0b'};
+    box-shadow: 0 0 8px ${source === 'local' ? '#a78bfa' : isRealData ? '#10b981' : '#f59e0b'};
     flex-shrink: 0;
   }
   #html-dev-bar select {
@@ -273,7 +349,7 @@ function buildDevOverlaySnippet({ mode, langPref, sessionId, sessionsList, isRea
     padding: 3px 10px;
     font-size: 11px;
     font-family: inherit;
-    max-width: 240px;
+    max-width: 230px;
     cursor: pointer;
     outline: none;
   }
@@ -299,14 +375,21 @@ function buildDevOverlaySnippet({ mode, langPref, sessionId, sessionsList, isRea
     border-color: rgba(56, 189, 248, 0.45);
     color: #bae6fd;
   }
+  #html-dev-bar .src-pill {
+    background: ${source === 'local' ? 'rgba(139, 92, 246, 0.25)' : 'rgba(16, 185, 129, 0.16)'};
+    border-color: ${source === 'local' ? 'rgba(167, 139, 250, 0.55)' : 'rgba(52, 211, 153, 0.45)'};
+    color: ${source === 'local' ? '#ddd6fe' : '#a7f3d0'};
+  }
 </style>
-<div id="html-dev-bar" title="معاينة حقيقية لآخر الجلسات — تتحدث تلقائياً عند تعديل الكود">
+<div id="html-dev-bar" title="معاينة فورية لبياناتك — تتحدث تلقائياً بدون نشر">
   <span class="dev-dot"></span>
-  <span>${isRealData ? 'بيانات حقيقية' : 'احتياطي'}</span>
+  <a class="src-pill" href="${escapeHtml(makeUrl({ source: nextSource, sessionId: '' }))}" title="التبديل بين السحابة الحية ومعالجة PDF محلياً بدون نشر">
+    ${source === 'local' ? 'توليد حي من PDF' : 'السحابة الحية'}
+  </a>
   ${optionsMarkup ? `<select id="dev-session-select" aria-label="اختر جلسة حقيقية">${optionsMarkup}</select>` : ''}
-  ${hasWebApp ? `<a class="mode-pill" href="${escapeHtml(makeUrl({ mode: nextMode }))}">${mode === 'web' ? 'واجهة: الرابط السحابي' : 'واجهة: ملف HTML'}</a>` : ''}
+  ${hasWebApp ? `<a class="mode-pill" href="${escapeHtml(makeUrl({ mode: nextMode }))}">${mode === 'web' ? 'واجهة: الرابط' : 'واجهة: HTML'}</a>` : ''}
   <a href="${escapeHtml(makeUrl({ lang: nextLang }))}">${escapeHtml(langBtnLabel)}</a>
-  <a href="${escapeHtml(makeUrl({ refresh: true }))}" title="جلب أحدث جلسة من السحابة الآن">🔄 تحديث</a>
+  <a href="${escapeHtml(makeUrl({ refresh: true }))}" title="إعادة الجلب أو المعالجة الآن">🔄 تحديث</a>
   <button type="button" onclick="document.getElementById('html-dev-bar').remove()" title="إخفاء الشريط">✕</button>
 </div>
 <script>
@@ -317,6 +400,7 @@ function buildDevOverlaySnippet({ mode, langPref, sessionId, sessionsList, isRea
       var id = sel.value;
       var params = new URLSearchParams(window.location.search);
       params.set('session', id);
+      params.set('source', ${JSON.stringify(source)});
       params.set('mode', ${JSON.stringify(mode)});
       if (${JSON.stringify(mode)} === 'web') params.set('mushaf', id);
       window.location.search = params.toString();
@@ -332,15 +416,13 @@ function injectBeforeLastBodyClose(html, snippet) {
   return `${html.slice(0, idx)}${snippet}\n${html.slice(idx)}`;
 }
 
-function renderWebAppWithRealSession({ webHtml, sessionId, langPref, overlay }) {
-  // Rewrite Firebase audioMushafSessions fetch inside local preview to serve cached session with optional lang override
+function renderWebAppWithSession({ webHtml, source, langPref, overlay }) {
   let html = webHtml;
-  const localUrlExpr = `'/local-session/' + encodeURIComponent(sessionId) + '.json?lang=${encodeURIComponent(langPref)}'`;
+  const localUrlExpr = `'/local-session/' + encodeURIComponent(sessionId) + '.json?source=${encodeURIComponent(source)}&lang=${encodeURIComponent(langPref)}'`;
   html = html.replace(
     /(['"])https:\/\/quran-classes-tracker-default-rtdb\.firebaseio\.com\/audioMushafSessions\/\1\s*\+\s*encodeURIComponent\(sessionId\)\s*\+\s*(['"])\.json\2/,
     localUrlExpr
   );
-  // Disable service worker registration during localhost preview
   html = html.replace(
     /if\s*\(\s*'serviceWorker'\s+in\s+navigator\s*\)/,
     "if (false && 'serviceWorker' in navigator)"
@@ -348,8 +430,26 @@ function renderWebAppWithRealSession({ webHtml, sessionId, langPref, overlay }) 
   return injectBeforeLastBodyClose(html, overlay);
 }
 
+async function resolveSessionForRequest({ source, requestedId, forceRefresh }) {
+  if (source === 'local') {
+    const list = listLocalPdfSessions();
+    const target = (requestedId && list.find(x => x.id === requestedId)) || list[0] || null;
+    if (!target) return { session: null, sessionId: '', list: [], isRealData: false };
+    const session = await runLiveLocalPdfWorker(target, forceRefresh);
+    return { session, sessionId: target.id, list, isRealData: Boolean(session) };
+  }
+  try {
+    const res = await getCloudSessionData(requestedId, forceRefresh);
+    return { ...res, isRealData: Boolean(res.session) };
+  } catch (err) {
+    console.warn('تعذر جلب الجلسة السحابية، سيتم استخدام نموذج احتياطي:', err.message);
+    return { session: null, sessionId: '', list: [], isRealData: false };
+  }
+}
+
 async function renderPreviewPage(urlObj) {
   const hasWebApp = fs.existsSync(WEB_APP_HTML_PATH);
+  const source = urlObj.searchParams.get('source') === 'local' ? 'local' : 'cloud';
   const rawMode = urlObj.searchParams.get('mode');
   const mode = rawMode === 'html' ? 'html' : (hasWebApp ? 'web' : 'html');
   const langParam = urlObj.searchParams.get('lang');
@@ -358,23 +458,21 @@ async function renderPreviewPage(urlObj) {
   const forceRefresh = urlObj.searchParams.get('refresh') === '1';
   const requestedId = urlObj.searchParams.get('session') || urlObj.searchParams.get('mushaf') || '';
 
-  let realResult = { session: null, sessionId: '', list: [] };
-  try {
-    realResult = await getRealSessionData(requestedId, forceRefresh);
-  } catch (err) {
-    console.warn('تعذر جلب الجلسة الحقيقية من Firebase، سيتم استخدام نموذج احتياطي:', err.message);
-  }
+  const { session, sessionId, list, isRealData } = await resolveSessionForRequest({
+    source,
+    requestedId: requestedId === 'live_local' ? '' : requestedId,
+    forceRefresh,
+  });
 
-  const isRealData = Boolean(realResult.session);
-  const sessionData = realResult.session || buildFallbackSampleData();
-  const activeSessionId = realResult.sessionId || '';
+  const sessionData = session || buildFallbackSampleData();
   const effectiveLang = langPref === 'auto' ? (sessionData.language === 'en' ? 'en' : 'ar') : langPref;
 
   const overlay = buildDevOverlaySnippet({
+    source,
     mode,
     langPref,
-    sessionId: activeSessionId,
-    sessionsList: realResult.list,
+    sessionId,
+    sessionsList: list,
     isRealData,
     clean,
   });
@@ -382,9 +480,9 @@ async function renderPreviewPage(urlObj) {
   if (mode === 'web' && hasWebApp && isRealData) {
     const webHtml = fs.readFileSync(WEB_APP_HTML_PATH, 'utf8');
     return {
-      html: renderWebAppWithRealSession({ webHtml, sessionId: activeSessionId, langPref, overlay }),
-      redirectToMushaf: !urlObj.searchParams.get('mushaf') && activeSessionId
-        ? `/?mushaf=${encodeURIComponent(activeSessionId)}&session=${encodeURIComponent(activeSessionId)}&mode=web${langPref !== 'auto' ? `&lang=${langPref}` : ''}`
+      html: renderWebAppWithSession({ webHtml, source, langPref, overlay }),
+      redirectToMushaf: !urlObj.searchParams.get('mushaf')
+        ? `/?mushaf=${encodeURIComponent(sessionId || 'live_local')}&source=${source}&mode=web${sessionId ? `&session=${encodeURIComponent(sessionId)}` : ''}${langPref !== 'auto' ? `&lang=${langPref}` : ''}`
         : null,
     };
   }
@@ -397,8 +495,7 @@ async function renderPreviewPage(urlObj) {
     sections: Array.isArray(sessionData.sections) ? sessionData.sections : [],
   });
 
-  const htmlWithOverlay = injectBeforeLastBodyClose(rawHtml, overlay);
-  return { html: htmlWithOverlay, redirectToMushaf: null };
+  return { html: injectBeforeLastBodyClose(rawHtml, overlay), redirectToMushaf: null };
 }
 
 function renderErrorHtml(err) {
@@ -417,7 +514,7 @@ function renderErrorHtml(err) {
 </head>
 <body>
   <div class="box">
-    <h1>حدث خطأ مؤقت أثناء تحميل المعاينة — سيتم التحديث تلقائياً فور الإصلاح:</h1>
+    <h1>حدث خطأ مؤقت أثناء تجهيز المعاينة — سيتم التحديث تلقائياً فور الإصلاح:</h1>
     <pre>${msg}</pre>
   </div>
   <script>
@@ -475,7 +572,12 @@ const server = http.createServer(async (req, res) => {
   if (urlObj.pathname.startsWith('/local-session/') && urlObj.pathname.endsWith('.json')) {
     try {
       const id = decodeURIComponent(urlObj.pathname.slice('/local-session/'.length, -'.json'.length));
-      const { session } = await getRealSessionData(id, false);
+      const source = urlObj.searchParams.get('source') === 'local' ? 'local' : 'cloud';
+      const { session } = await resolveSessionForRequest({
+        source,
+        requestedId: id === 'live_local' ? '' : id,
+        forceRefresh: false,
+      });
       if (!session) {
         res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end('null');
@@ -533,33 +635,57 @@ server.on('error', (err) => {
 });
 
 server.listen(PORT, HOST, () => {
-  console.log(`معاينة واجهة HTML الحقيقية تعمل الآن على: ${BASE_URL}`);
-  console.log('يتم جلب أحدث جلسة حقيقية مع التحديث التلقائي عند تعديل التصميم.');
+  console.log(`معاينة المصحح الصوتي المباشرة تعمل الآن على: ${BASE_URL}`);
 
   const watchers = [];
   let reloadTimer = null;
-  const triggerReload = (label) => {
+  const triggerReload = (label, clearLocal = false) => {
     clearTimeout(reloadTimer);
     reloadTimer = setTimeout(() => {
-      console.log(`[تحديث تلقائي] تم تعديل ${label}`);
+      if (clearLocal) localRenderCache.clear();
+      console.log(`[تحديث تلقائي] ${label}`);
       notifyReload();
-    }, 120);
+    }, 150);
   };
 
   watchers.push(fs.watch(CORE_DIR, (_ev, fileName) => {
     if (fileName && /\.(js|css|html)$/i.test(String(fileName))) {
-      triggerReload(`core/${fileName}`);
+      triggerReload(`core/${fileName}`, true);
     }
   }));
 
   if (fs.existsSync(WEB_APP_HTML_PATH)) {
-    const webDir = path.dirname(WEB_APP_HTML_PATH);
-    watchers.push(fs.watch(webDir, (_ev, fileName) => {
+    watchers.push(fs.watch(path.dirname(WEB_APP_HTML_PATH), (_ev, fileName) => {
       if (fileName && String(fileName).toLowerCase() === 'index.html') {
-        triggerReload('student-web-app/index.html');
+        triggerReload('student-web-app/index.html', false);
       }
     }));
   }
+
+  // Watch local audio sessions directory so newly saved recordings auto-refresh local PDF mode
+  try {
+    const store = loadSessionStoreFresh();
+    if (store.SESSIONS_ROOT_DIR && fs.existsSync(store.SESSIONS_ROOT_DIR)) {
+      watchers.push(fs.watch(store.SESSIONS_ROOT_DIR, { recursive: true }, (_ev, fileName) => {
+        if (fileName && /session\.json$/i.test(String(fileName))) {
+          triggerReload('local-session update', true);
+        }
+      }));
+    }
+  } catch { /* ignore recursive watch fallback */ }
+
+  // Auto-detect new published cloud sessions only while a preview tab is open
+  const cloudPoll = setInterval(async () => {
+    if (sseClients.size === 0) return;
+    try {
+      const prevNewest = lastKnownNewestCloudId;
+      const list = await listRecentCloudSessions(true);
+      if (list[0]?.id && prevNewest && list[0].id !== prevNewest) {
+        console.log(`[جلسة جديدة] تم رصد ${list[0].label}`);
+        notifyReload();
+      }
+    } catch { /* ignore transient network blip */ }
+  }, 5000);
 
   const heartbeat = setInterval(() => {
     for (const client of sseClients) {
@@ -573,6 +699,7 @@ server.listen(PORT, HOST, () => {
 
   const cleanup = () => {
     clearInterval(heartbeat);
+    clearInterval(cloudPoll);
     for (const w of watchers) {
       try { w.close(); } catch { /* ignore */ }
     }
