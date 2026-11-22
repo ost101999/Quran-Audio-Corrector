@@ -436,7 +436,7 @@ function createTray() {
         trayIcon = trayIcon.resize({ width: 32, height: 32 });
     }
     tray = new Tray(trayIcon);
-    tray.setToolTip('المصحح الصوتي (RCtrl + R)');
+    tray.setToolTip(process.platform === 'darwin' ? 'المصحح الصوتي (Fn + R)' : 'المصحح الصوتي (RCtrl + R)');
     tray.on('click', () => {
         if (!mainWindow || mainWindow.isDestroyed()) return;
         if (mainWindow.isVisible()) hideHudWindow();
@@ -444,6 +444,49 @@ function createTray() {
     });
     updateTrayMenu();
     return tray;
+}
+
+function createMacAppMenu() {
+    if (process.platform !== 'darwin') return;
+    const sendEditAction = (action) => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('hud-edit-action', action);
+        }
+    };
+    const menu = Menu.buildFromTemplate([
+        {
+            label: 'المصحح الصوتي',
+            submenu: [
+                { role: 'about' },
+                { type: 'separator' },
+                { role: 'hide' },
+                { role: 'hideOthers' },
+                { role: 'unhide' },
+                { type: 'separator' },
+                {
+                    label: 'إغلاق المصحح الصوتي',
+                    accelerator: 'Cmd+Q',
+                    click: () => {
+                        isQuitting = true;
+                        app.quit();
+                    },
+                },
+            ],
+        },
+        {
+            label: 'Edit',
+            submenu: [
+                { label: 'Undo', accelerator: 'Cmd+Z', click: () => sendEditAction('undo') },
+                { label: 'Redo', accelerator: 'Shift+Cmd+Z', click: () => sendEditAction('redo') },
+                { type: 'separator' },
+                { role: 'cut' },
+                { role: 'copy' },
+                { role: 'paste' },
+                { role: 'selectAll' },
+            ],
+        },
+    ]);
+    Menu.setApplicationMenu(menu);
 }
 
 function registerShortcuts() {
@@ -473,9 +516,17 @@ if (!gotSingleInstanceLock) {
     });
     app.whenReady().then(() => {
         fs.mkdirSync(SESSIONS_ROOT_DIR, { recursive: true });
+        createMacAppMenu();
         createWindow();
         createTray();
         registerShortcuts();
+    });
+    app.on('activate', () => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            showHudWindow();
+        } else {
+            createWindow();
+        }
     });
 }
 
@@ -839,6 +890,12 @@ ipcMain.handle('session:export', async (_event, { sessionKey, sourcePdfPath, mod
         sessionId: published.sessionId,
         unmatchedCount: unmatchedClips.length,
     };
+});
+
+ipcMain.handle('hud:native-edit', (event, action) => {
+    if (action === 'undo') event.sender.undo();
+    else if (action === 'redo') event.sender.redo();
+    return { ok: true };
 });
 
 ipcMain.handle('hud:open-output-folder', async () => {

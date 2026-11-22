@@ -24,9 +24,15 @@ contextBridge.exposeInMainWorld('correctorAPI', {
     renderPages: (payload) => ipcRenderer.invoke('session:render-pages', payload),
     clipDataUrl: (payload) => ipcRenderer.invoke('session:clip-data-url', payload),
     exportSession: (payload) => ipcRenderer.invoke('session:export', payload),
+    nativeEdit: (action) => ipcRenderer.invoke('hud:native-edit', action),
     onShortcut: (cb) => {
         const handler = (_event, action) => cb(action);
         ipcRenderer.on('hud-shortcut', handler);
         return () => ipcRenderer.removeListener('hud-shortcut', handler);
+    },
+    onEditAction: (cb) => {
+        const handler = (_event, action) => cb(action);
+        ipcRenderer.on('hud-edit-action', handler);
+        return () => ipcRenderer.removeListener('hud-edit-action', handler);
     },
 });

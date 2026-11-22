@@ -1,4 +1,5 @@
 #!/bin/bash
+export PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"
 cd "$(dirname "$0")"
 unset ELECTRON_RUN_AS_NODE
 unset VITE_DEV_SERVER_URL

@@ -27,7 +27,9 @@ declare global {
       renderPages: (payload: { sourcePdfPath: string; pageNumbers: number[]; scale?: number; recolorAnnotations?: any[] }) => Promise<{ success: boolean; error?: string; images: Record<string, { imageDataUrl: string; width: number; height: number }> }>;
       clipDataUrl: (payload: { sessionKey: string; fileName: string }) => Promise<string>;
       exportSession: (payload: { sessionKey: string; sourcePdfPath?: string; mode: 'web_link' | 'html'; language?: 'ar' | 'en'; autoSave?: boolean }) => Promise<any>;
+      nativeEdit: (action: 'undo' | 'redo') => Promise<{ ok: boolean }>;
       onShortcut: (cb: (action: 'toggle-record' | 'undo-last' | 'redo-last' | 'finish-export') => void) => () => void;
+      onEditAction: (cb: (action: 'undo' | 'redo') => void) => () => void;
     };
   }
 }

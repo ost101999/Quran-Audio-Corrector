@@ -409,16 +409,50 @@ export default function App() {
     handleExport,
   };
 
-  // Listen to global shortcuts F17 / F22 / F21 / F20 once without re-binding churn
+  // Listen to global shortcuts F17 / F22 / F21 / F20 and focused Undo/Redo shortcuts
   useEffect(() => {
-    if (!window.correctorAPI) return;
-    return window.correctorAPI.onShortcut((action) => {
+    const isTypingElement = (el: Element | null) => {
+      if (!(el instanceof HTMLElement)) return false;
+      const tag = el.tagName.toUpperCase();
+      return tag === 'INPUT' || tag === 'TEXTAREA' || el.isContentEditable;
+    };
+
+    const onFocusedUndoRedo = (e: KeyboardEvent) => {
+      if (e.repeat || e.altKey || !(e.ctrlKey || e.metaKey)) return;
+      if (isTypingElement(document.activeElement)) return;
+      const h = shortcutHandlersRef.current;
+      if (e.code === 'KeyZ' && !e.shiftKey) {
+        e.preventDefault();
+        void h.handleUndoLast();
+      } else if ((e.code === 'KeyY' && !e.shiftKey) || (e.code === 'KeyZ' && e.shiftKey)) {
+        e.preventDefault();
+        void h.handleRedoLast();
+      }
+    };
+
+    window.addEventListener('keydown', onFocusedUndoRedo);
+    const unsubGlobal = window.correctorAPI?.onShortcut((action) => {
       const h = shortcutHandlersRef.current;
       if (action === 'toggle-record') void h.toggleRecording();
       else if (action === 'undo-last') void h.handleUndoLast();
       else if (action === 'redo-last') void h.handleRedoLast();
       else if (action === 'finish-export') void h.handleExport('web_link');
     });
+    const unsubEdit = window.correctorAPI?.onEditAction((action) => {
+      if (isTypingElement(document.activeElement)) {
+        void window.correctorAPI?.nativeEdit(action);
+        return;
+      }
+      const h = shortcutHandlersRef.current;
+      if (action === 'undo') void h.handleUndoLast();
+      else if (action === 'redo') void h.handleRedoLast();
+    });
+
+    return () => {
+      window.removeEventListener('keydown', onFocusedUndoRedo);
+      if (unsubGlobal) unsubGlobal();
+      if (unsubEdit) unsubEdit();
+    };
   }, []);
 
   const playClipAudio = async (clip: { id: string; fileName: string }) => {
@@ -951,7 +985,7 @@ export default function App() {
             disabled={busy || isRecording || clipsCount === 0}
             onClick={() => void handleUndoLast()}
             className="p-2 rounded-xl bg-white/10 hover:bg-white/20 disabled:opacity-35 text-slate-200 shrink-0"
-            title="تراجع عن آخر تسجيل (F22)"
+            title="تراجع عن آخر تسجيل (F22 أو Ctrl+Z)"
           >
             <RotateCcw size={14} />
           </button>
@@ -961,7 +995,7 @@ export default function App() {
             disabled={busy || isRecording || redoCount === 0}
             onClick={() => void handleRedoLast()}
             className="p-2 rounded-xl bg-white/10 hover:bg-white/20 disabled:opacity-35 text-slate-200 shrink-0"
-            title="إعادة التسجيل المتراجع عنه (F21)"
+            title="إعادة التسجيل المتراجع عنه (F21 أو Ctrl+Y / Ctrl+Shift+Z)"
           >
             <RotateCw size={14} />
           </button>
