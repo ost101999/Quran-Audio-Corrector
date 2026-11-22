@@ -11,6 +11,7 @@ const {
 } = require('./core/annotation-matcher');
 const {
     SESSIONS_ROOT_DIR,
+    HUD_STATE_PATH,
     loadHudState,
     saveHudState,
     OUTPUT_HTML_DIR,
@@ -375,11 +376,11 @@ function createWindow() {
             moveSaveTimer = null;
         }
         persistCurrentBounds(false);
-        if (!isQuitting && process.platform !== 'darwin') {
-            ev.preventDefault();
-            hideHudWindow();
-        }
-    });
+            if (!isQuitting) {
+                ev.preventDefault();
+                hideHudWindow();
+            }
+        });
 
     const devUrl = process.env.VITE_DEV_SERVER_URL;
     if (devUrl) {
@@ -391,9 +392,15 @@ function createWindow() {
 
 function showHudWindow() {
     if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (process.platform === 'darwin') {
+        app.show();
+    }
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.setSkipTaskbar(false);
     mainWindow.show();
+    if (process.platform === 'darwin') {
+        app.focus({ steal: true });
+    }
     mainWindow.focus();
 }
 
@@ -401,6 +408,21 @@ function hideHudWindow() {
     if (!mainWindow || mainWindow.isDestroyed()) return;
     mainWindow.hide();
     mainWindow.setSkipTaskbar(true);
+    if (process.platform === 'darwin') {
+        app.hide();
+    }
+}
+
+function toggleHudVisibility() {
+    if (!mainWindow || mainWindow.isDestroyed()) {
+        createWindow();
+        return;
+    }
+    if (mainWindow.isVisible()) {
+        hideHudWindow();
+    } else {
+        showHudWindow();
+    }
 }
 
 function buildHudMenu() {
@@ -507,6 +529,8 @@ function registerShortcuts() {
     }
 }
 
+const HUD_PID_PATH = path.join(path.dirname(HUD_STATE_PATH), 'hud.pid');
+
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!gotSingleInstanceLock) {
     app.quit();
@@ -516,11 +540,17 @@ if (!gotSingleInstanceLock) {
     });
     app.whenReady().then(() => {
         fs.mkdirSync(SESSIONS_ROOT_DIR, { recursive: true });
+        try { fs.writeFileSync(HUD_PID_PATH, String(process.pid), 'utf8'); } catch { /* ignore */ }
         createMacAppMenu();
         createWindow();
         createTray();
         registerShortcuts();
     });
+    if (process.platform !== 'win32') {
+        process.on('SIGUSR1', () => {
+            toggleHudVisibility();
+        });
+    }
     app.on('activate', () => {
         if (mainWindow && !mainWindow.isDestroyed()) {
             showHudWindow();
@@ -535,6 +565,11 @@ app.on('before-quit', () => {
 });
 
 app.on('will-quit', () => {
+    try {
+        if (fs.existsSync(HUD_PID_PATH) && fs.readFileSync(HUD_PID_PATH, 'utf8').trim() === String(process.pid)) {
+            fs.unlinkSync(HUD_PID_PATH);
+        }
+    } catch { /* ignore */ }
     globalShortcut.unregisterAll();
     if (tray && !tray.isDestroyed()) {
         try { tray.destroy(); } catch { /* ignore */ }
