@@ -146,20 +146,30 @@ test('publishAudioSessionToCloud retains at most 3 newest sessions per student a
 
   const res = await publishAudioSessionToCloud({
     studentId: 's1',
-    studentName: 'Bilal',
+    studentName: 'Mohammed Furqan',
     dateStr: '2026-11-21',
     createdAt: 400,
     sections: [],
   }, { maxSessionsPerStudent: 3, requestImpl: mockRequest });
 
   assert.equal(res.success, true);
-  assert.match(res.sessionId, /^[a-z0-9]{6}$/);
-  assert.equal(res.url, `https://qm7.vercel.app/m/${res.sessionId}`);
+  assert.match(res.sessionId, /^mohammed-furqan-[A-Za-z0-9]{2}$/);
+  assert.equal(res.url, `https://o-quran.vercel.app/m/${res.sessionId}`);
   assert.equal(res.prunedCount, 1);
   assert.equal(store['/audioMushafSessions/old1.json'], undefined);
   assert.ok(store['/audioMushafSessions/old2.json']);
   assert.ok(store['/audioMushafSessions/old3.json']);
   assert.equal(Object.keys(store['/audioMushafIndex/s1.json']).length, 3);
+
+  const resThreeNames = await publishAudioSessionToCloud({
+    studentId: 's2',
+    studentName: 'Ahmed Ali Hassan',
+    dateStr: '2026-11-21',
+    createdAt: 500,
+    sections: [],
+  }, { maxSessionsPerStudent: 3, requestImpl: mockRequest });
+  assert.match(resThreeNames.sessionId, /^ahmed-ali-[A-Za-z0-9]{2}$/);
+  assert.equal(resThreeNames.url, `https://o-quran.vercel.app/m/${resThreeNames.sessionId}`);
 
   const html = buildInteractiveHtml({
     studentName: 'Bilal',

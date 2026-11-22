@@ -466,11 +466,24 @@ function createWindow() {
             moveSaveTimer = null;
         }
         persistCurrentBounds(false);
-            if (!isQuitting) {
-                ev.preventDefault();
-                hideHudWindow();
-            }
-        });
+        if (!isQuitting) {
+            ev.preventDefault();
+            hideHudWindow();
+        }
+    });
+    mainWindow.webContents.on('render-process-gone', (_ev, details) => {
+        if (isQuitting) return;
+        if (details?.reason !== 'clean-exit') {
+            setTimeout(() => {
+                if (!mainWindow || mainWindow.isDestroyed()) {
+                    createWindow();
+                } else {
+                    mainWindow.reload();
+                    showHudWindow();
+                }
+            }, 300);
+        }
+    });
 
     const devUrl = process.env.VITE_DEV_SERVER_URL;
     if (devUrl) {
@@ -481,11 +494,21 @@ function createWindow() {
 }
 
 function showHudWindow() {
-    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (!mainWindow || mainWindow.isDestroyed()) {
+        createWindow();
+        return;
+    }
     if (process.platform === 'darwin') {
         app.show();
     }
     if (mainWindow.isMinimized()) mainWindow.restore();
+    try {
+        const b = mainWindow.getBounds();
+        const clamped = clampHudCoordinates(b.x, b.y, b.width, b.height);
+        if (clamped.x !== b.x || clamped.y !== b.y) {
+            mainWindow.setPosition(clamped.x, clamped.y);
+        }
+    } catch { /* ignore bounds check */ }
     mainWindow.setSkipTaskbar(false);
     mainWindow.show();
     if (process.platform === 'darwin') {
