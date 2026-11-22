@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# Build المصحح الصوتي, safely install/replace /Applications/المصحح الصوتي.app, and launch it.
-set -euo pipefail
+# Build المصحح الصوتي, install/replace /Applications/المصحح الصوتي.app, launch it, clean old build files, and wait for any key to close.
+set -uo pipefail
 
 unset ELECTRON_RUN_AS_NODE
 unset VITE_DEV_SERVER_URL
@@ -14,62 +14,12 @@ installed_app="/Applications/$app_name"
 stage_app="/Applications/.$app_name.new"
 old_app="/Applications/.$app_name.old"
 
-if [[ ! -d "$project_dir" ]]; then
-  echo "Project folder not found: $project_dir"
-  read -r -p "Press Enter to close..."
-  exit 1
-fi
-
-[[ -e "$stage_app" ]] && rm -rf "$stage_app"
-if [[ -e "$old_app" ]]; then
-  if [[ ! -e "$installed_app" ]]; then
-    mv "$old_app" "$installed_app"
-  else
-    osascript -e 'tell application "Finder" to delete POSIX file "'"$old_app"'"' >/dev/null 2>&1 || rm -rf "$old_app"
-  fi
-fi
-
-echo "Closing running copies of المصحح الصوتي..."
-osascript -e 'tell application id "'"$bundle_id"'" to quit' >/dev/null 2>&1 || true
-pkill -f "$project_dir/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron" >/dev/null 2>&1 || true
-sleep 1
-
-cd "$project_dir"
-npm install --no-audit --no-fund
-npm run electron:build
-
-case "$(uname -m)" in
-  arm64) source_app="$project_dir/dist_electron/mac-arm64/$app_name" ;;
-  x86_64) source_app="$project_dir/dist_electron/mac/$app_name" ;;
-  *) echo "Unsupported Mac architecture."; exit 1 ;;
-esac
-
-if [[ ! -d "$source_app" ]]; then
-  echo "The macOS application was not created: $source_app"
-  read -r -p "Press Enter to close..."
-  exit 1
-fi
-
-ditto "$source_app" "$stage_app"
-[[ -e "$installed_app" ]] && mv "$installed_app" "$old_app"
-if ! mv "$stage_app" "$installed_app"; then
-  [[ -e "$old_app" && ! -e "$installed_app" ]] && mv "$old_app" "$installed_app"
-  exit 1
-fi
-
-if [[ -e "$old_app" ]]; then
-  osascript -e 'tell application "Finder" to delete POSIX file "'"$old_app"'"' >/dev/null 2>&1 || rm -rf "$old_app"
-fi
-
-env -u ELECTRON_RUN_AS_NODE open "$installed_app"
-echo "Installed and opened: $installed_app"
-
-sleep 2
-tty_name="$(tty 2>/dev/null || true)"
-if [[ -n "$tty_name" && "$tty_name" != "not a tty" ]]; then
-  (
-    sleep 1
-    osascript - "$tty_name" >/dev/null 2>&1 <<'APPLESCRIPT'
+close_terminal_tab() {
+  local tty_name
+  tty_name="$(tty 2>/dev/null || true)"
+  if [[ -n "$tty_name" && "$tty_name" != "not a tty" ]]; then
+    (
+      osascript - "$tty_name" >/dev/null 2>&1 <<'APPLESCRIPT'
 on run argv
   set myTTY to item 1 of argv
   tell application "Terminal"
@@ -83,24 +33,91 @@ on run argv
         end repeat
       end try
     end repeat
-    delay 0.5
-    repeat with w in (every window)
-      try
-        set t to selected tab of w
-        if (busy of t) is false then
-          set c to contents of t
-          if c starts with "Last login" then
-            set n to (do shell script "printf %s " & quoted form of c & " | grep -c '[^[:space:]]' || true") as integer
-            if n <= 2 then close w saving no
-          end if
-        end if
-      end try
-    end repeat
     if (count of windows) is 0 then quit
   end tell
 end run
 APPLESCRIPT
-  ) &
-  disown
+    ) >/dev/null 2>&1 &
+    disown || true
+  fi
+}
+
+pause_and_exit() {
+  local code="${1:-0}"
+  echo ""
+  echo "Press any key or number to close..."
+  if [[ -t 0 ]]; then
+    read -r -n 1 -s || true
+  fi
+  close_terminal_tab
+  exit "$code"
+}
+
+if [[ ! -d "$project_dir" ]]; then
+  echo "Project folder not found: $project_dir"
+  pause_and_exit 1
 fi
-exit 0
+
+[[ -e "$stage_app" ]] && rm -rf "$stage_app"
+if [[ -e "$old_app" ]]; then
+  if [[ ! -e "$installed_app" ]]; then
+    mv "$old_app" "$installed_app"
+  else
+    rm -rf "$old_app"
+  fi
+fi
+
+echo "[1/4] Closing running app..."
+osascript -e 'tell application id "'"$bundle_id"'" to quit' >/dev/null 2>&1 || true
+pkill -f "$installed_app/Contents/MacOS/" >/dev/null 2>&1 || true
+pkill -f "$project_dir/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron" >/dev/null 2>&1 || true
+sleep 1
+
+echo "[2/4] Cleaning previous build files and building..."
+cd "$project_dir" || pause_and_exit 1
+rm -rf "$project_dir/dist" "$project_dir/dist_electron"
+
+if ! npm install --no-audit --no-fund; then
+  echo "npm install failed."
+  pause_and_exit 1
+fi
+
+if ! npm run electron:build; then
+  echo "Build failed."
+  pause_and_exit 1
+fi
+
+case "$(uname -m)" in
+  arm64) source_app="$project_dir/dist_electron/mac-arm64/$app_name" ;;
+  x86_64) source_app="$project_dir/dist_electron/mac/$app_name" ;;
+  *) echo "Unsupported Mac architecture."; pause_and_exit 1 ;;
+esac
+
+if [[ ! -d "$source_app" ]]; then
+  echo "The macOS application was not created: $source_app"
+  pause_and_exit 1
+fi
+
+echo "[3/4] Removing old installed app and installing new build..."
+pkill -f "$installed_app/Contents/MacOS/" >/dev/null 2>&1 || true
+ditto "$source_app" "$stage_app" || { echo "Failed to stage new app."; pause_and_exit 1; }
+if [[ -e "$installed_app" ]]; then
+  mv "$installed_app" "$old_app" || { echo "Failed to move old app."; pause_and_exit 1; }
+fi
+if ! mv "$stage_app" "$installed_app"; then
+  [[ -e "$old_app" && ! -e "$installed_app" ]] && mv "$old_app" "$installed_app"
+  echo "Failed to install new app."
+  pause_and_exit 1
+fi
+[[ -e "$old_app" ]] && rm -rf "$old_app"
+
+echo "[4/4] Launching app and removing old installer files..."
+env -u ELECTRON_RUN_AS_NODE open "$installed_app"
+sleep 1
+rm -rf "$project_dir/dist_electron"
+
+echo ""
+echo "==================================================="
+echo " Done! Built, installed, launched, and cleaned up."
+echo "==================================================="
+pause_and_exit 0
