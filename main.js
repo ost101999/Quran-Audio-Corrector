@@ -305,8 +305,8 @@ async function copyFileToOsClipboard(filePath) {
 function createWindow() {
     const savedHud = loadHudState();
     const initialMode = savedHud?.mode === 'pill' ? 'pill' : 'bar';
-    const initW = initialMode === 'pill' ? 78 : 410;
-    const initH = initialMode === 'pill' ? 112 : 172;
+    const initW = initialMode === 'pill' ? 128 : 432;
+    const initH = initialMode === 'pill' ? 156 : 192;
     const startX = initialMode === 'pill' && Number.isFinite(Number(savedHud?.pillPos?.x))
         ? savedHud.pillPos.x
         : savedHud?.x;
@@ -341,7 +341,7 @@ function createWindow() {
         if (!mainWindow || mainWindow.isDestroyed()) return;
         const b = mainWindow.getBounds();
         if (b.width > 460) return; // Never overwrite docked bar/pill position with centered Review modal
-        const isPill = b.width <= 120;
+        const isPill = b.width <= 160;
         if (isPill) {
             saveHudState({ x: b.x, y: b.y, mode: 'pill', pillPos: { x: b.x, y: b.y } });
         } else {
@@ -451,8 +451,8 @@ ipcMain.handle('hud:resize', (_event, { width, height, anchorSide }) => {
     }
 
     suppressMoveUntil = Date.now() + 400;
-    const targetMode = nextW <= 120 ? 'pill' : 'bar';
-    const currentIsPill = bounds.width <= 120;
+    const targetMode = nextW <= 160 ? 'pill' : 'bar';
+    const currentIsPill = bounds.width <= 160;
 
     if (currentIsPill && targetMode === 'bar') {
         // Remember exact pill coordinates before expanding, then grow away from screen edges
@@ -501,7 +501,7 @@ ipcMain.handle('hud:snap-edge', () => {
     const nextY = Math.max(area.y + 10, Math.min(bounds.y, area.y + area.height - bounds.height - 10));
     mainWindow.setPosition(Math.round(nextX), Math.round(nextY));
     if (bounds.width <= 460) {
-        saveHudState({ x: Math.round(nextX), y: Math.round(nextY), mode: bounds.width <= 120 ? 'pill' : 'bar' });
+        saveHudState({ x: Math.round(nextX), y: Math.round(nextY), mode: bounds.width <= 160 ? 'pill' : 'bar' });
     }
     return { ok: true, side: snapRight ? 'right' : 'left' };
 });

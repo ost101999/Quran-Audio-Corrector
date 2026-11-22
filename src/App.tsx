@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  ArrowUp,
   Check,
   ChevronDown,
   Eye,
@@ -96,9 +97,9 @@ export default function App() {
     const api = window.correctorAPI;
     if (!api) return;
     if (mode === 'pill') {
-      void api.resize({ width: 78, height: 112, anchorSide: 'edge' });
+      void api.resize({ width: 128, height: 156, anchorSide: 'edge' });
     } else if (mode === 'bar') {
-      void api.resize({ width: 410, height: 172, anchorSide: 'edge' });
+      void api.resize({ width: 432, height: 192, anchorSide: 'edge' });
     } else {
       void api.resize({ width: 900, height: 760, anchorSide: 'center' });
     }
@@ -446,34 +447,99 @@ export default function App() {
 
   // === MODE 1: COLLAPSED EDGE PILL ===
   if (mode === 'pill') {
+    const shortStudentName = selectedStudent.name === 'في انتظار فتح مصحف...'
+      ? 'بانتظار مصحف'
+      : selectedStudent.name;
+    const pillShadow = busy
+      ? '0 10px 22px -6px rgba(14, 165, 233, 0.34), 0 0 18px -4px rgba(56, 189, 248, 0.24)'
+      : isRecording
+        ? '0 10px 22px -6px rgba(244, 63, 94, 0.38), 0 0 18px -4px rgba(251, 113, 133, 0.26)'
+        : '0 10px 20px -6px rgba(2, 6, 23, 0.55), 0 4px 12px -4px rgba(16, 185, 129, 0.16)';
+    const btnShadow = busy
+      ? '0 6px 14px -3px rgba(56, 189, 248, 0.42)'
+      : isRecording
+        ? '0 6px 14px -3px rgba(244, 63, 94, 0.45)'
+        : '0 6px 14px -3px rgba(16, 185, 129, 0.42)';
+
     return (
-      <div className="w-full h-full flex items-center justify-center p-1.5">
+      <div className="w-full h-full flex items-center justify-center p-5">
         <div
-          className={`hud-drag w-full h-full rounded-2xl border shadow-xl flex flex-col items-center justify-between py-2 px-1 transition-all ${
-            isRecording
-              ? 'bg-rose-950/95 border-rose-400/70 shadow-rose-500/30'
-              : 'bg-slate-900/92 border-emerald-400/40 shadow-black/40'
+          style={{
+            boxShadow: pillShadow,
+            background: busy
+              ? 'linear-gradient(160deg, rgba(12, 74, 110, 0.94), rgba(15, 23, 42, 0.97))'
+              : isRecording
+                ? 'linear-gradient(160deg, rgba(136, 19, 55, 0.94), rgba(30, 10, 20, 0.97))'
+                : 'linear-gradient(160deg, rgba(30, 41, 59, 0.93), rgba(15, 23, 42, 0.97))',
+          }}
+          className={`hud-drag w-full h-full rounded-[22px] border flex flex-col items-center justify-between py-2 px-1.5 transition-all duration-300 ${
+            busy
+              ? 'border-sky-400/60'
+              : isRecording
+                ? 'border-rose-400/65'
+                : 'border-emerald-400/35'
           }`}
         >
+          {/* Compact Student Name */}
+          <div
+            className="w-full px-1 flex items-center justify-center gap-1"
+            title={selectedStudent.name}
+          >
+            <span
+              className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                selectedStudent.sourcePdfPath ? 'bg-emerald-400' : 'bg-amber-400'
+              }`}
+            />
+            <span className="text-[10px] font-bold text-slate-200 truncate leading-tight">
+              {shortStudentName}
+            </span>
+          </div>
+
+          {/* Main Circular Action Button (Record / Stop / Upload Animation) */}
           <button
             type="button"
+            disabled={busy}
             onClick={() => void toggleRecording()}
-            title={isRecording ? 'إيقاف التسجيل (F20)' : 'بدء التسجيل (F20)'}
-            className={`hud-no-drag w-10 h-10 rounded-full flex items-center justify-center transition-transform active:scale-95 ${
-              isRecording ? 'bg-rose-500 text-white animate-pulse' : 'bg-emerald-500 text-white hover:bg-emerald-400'
+            style={{
+              boxShadow: btnShadow,
+              background: busy
+                ? 'linear-gradient(135deg, #38bdf8, #0284c7)'
+                : isRecording
+                  ? 'linear-gradient(135deg, #fb7185, #e11d48)'
+                  : 'linear-gradient(135deg, #34d399, #059669)',
+            }}
+            title={
+              busy
+                ? 'جاري التجهيز والرفع...'
+                : isRecording
+                  ? 'إيقاف التسجيل (F20)'
+                  : 'بدء التسجيل (F20)'
+            }
+            className={`hud-no-drag relative w-10 h-10 rounded-full flex items-center justify-center text-white transition-all duration-200 active:scale-95 ${
+              isRecording ? 'animate-pulse' : 'hover:brightness-110'
             }`}
           >
-            {isRecording ? <Square size={16} fill="currentColor" /> : <Mic size={18} />}
+            {busy ? (
+              <>
+                <span className="absolute -inset-1 rounded-full border-2 border-sky-300/30 border-t-white animate-spin pointer-events-none" />
+                <ArrowUp size={17} strokeWidth={2.6} className="animate-upload-float" />
+              </>
+            ) : isRecording ? (
+              <Square size={15} fill="currentColor" />
+            ) : (
+              <Mic size={17} />
+            )}
           </button>
 
+          {/* Expand / Counter Chip */}
           <button
             type="button"
             onClick={() => setMode('bar')}
             title="توسيع شريط المصحح الصوتي"
-            className="hud-no-drag w-full rounded-xl py-1 px-1 bg-white/10 hover:bg-white/20 text-white text-xs font-bold flex items-center justify-center gap-1"
+            className="hud-no-drag w-full rounded-xl py-0.5 px-1 bg-white/10 hover:bg-white/20 text-white text-[11px] font-bold flex items-center justify-center gap-1 transition-colors"
           >
-            <span>{isRecording ? `${recordSeconds}ث` : clipsCount}</span>
-            <Volume2 size={12} className="text-emerald-300" />
+            <span>{busy ? 'رفع...' : isRecording ? `${recordSeconds}ث` : clipsCount}</span>
+            {!busy && <Volume2 size={11} className="text-emerald-300" />}
           </button>
         </div>
       </div>
@@ -692,8 +758,14 @@ export default function App() {
 
   // === MODE 2: COMPACT FLOATING HUD BAR ===
   return (
-    <div className="w-full h-full p-1.5">
-      <div className="relative w-full h-full rounded-2xl bg-slate-900/95 backdrop-blur-md text-slate-100 border border-white/15 shadow-2xl flex flex-col justify-between p-3">
+    <div className="w-full h-full p-4">
+      <div
+        style={{
+          boxShadow: '0 10px 24px -6px rgba(2, 6, 23, 0.55), 0 4px 12px -4px rgba(16, 185, 129, 0.12)',
+          background: 'linear-gradient(155deg, rgba(30, 41, 59, 0.94), rgba(15, 23, 42, 0.97))',
+        }}
+        className="relative w-full h-full rounded-2xl backdrop-blur-md text-slate-100 border border-white/15 flex flex-col justify-between p-3"
+      >
         {/* Draggable Top Bar + Student Picker */}
         <div className="flex items-center justify-between gap-2">
           <div className="hud-drag flex items-center gap-1.5 cursor-grab flex-1 min-w-0">

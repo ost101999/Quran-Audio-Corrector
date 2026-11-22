@@ -19,3 +19,12 @@ html, body, #root {
 .hud-no-drag {
   -webkit-app-region: no-drag;
 }
+
+@keyframes uploadArrowFloat {
+  0%, 100% { transform: translateY(2px); opacity: 0.85; }
+  50% { transform: translateY(-2.5px); opacity: 1; }
+}
+
+.animate-upload-float {
+  animation: uploadArrowFloat 1s ease-in-out infinite;
+}
