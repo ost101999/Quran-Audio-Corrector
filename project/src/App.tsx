@@ -21,6 +21,7 @@ import {
   Trash2,
   UserCheck,
   Volume2,
+  X,
 } from 'lucide-react';
 import { AudioInputDevice, listAudioInputs, Mp3VoiceRecorder, playSoftTone } from './audioEncoder';
 
@@ -63,6 +64,8 @@ export default function App() {
   const [isRecording, setIsRecording] = useState(false);
   const [recordSeconds, setRecordSeconds] = useState(0);
   const [statusMsg, setStatusMsg] = useState('');
+  const [recordingAlert, setRecordingAlert] = useState('');
+  const [recordingTransition, setRecordingTransition] = useState(false);
   const [busy, setBusy] = useState(false);
   const [audioInputs, setAudioInputs] = useState<AudioInputDevice[]>([]);
   const [activeMic, setActiveMic] = useState<AudioInputDevice | null>(null);
@@ -93,7 +96,15 @@ export default function App() {
   const audioPlayerRef = useRef<HTMLAudioElement | null>(null);
   const modeRef = useRef<HudMode>(mode);
   modeRef.current = mode;
+  const hasRecordingAlert = Boolean(recordingAlert);
   const togglingRecordRef = useRef(false);
+  const recordingTargetRef = useRef<{ sessionKey: string; sourcePdfPath: string } | null>(null);
+
+  const warnRecording = useCallback((message: string) => {
+    setRecordingAlert(message);
+    setMode(current => current === 'pill' ? 'bar' : current);
+    playSoftTone(300, 260, 0.09);
+  }, []);
 
   const flashStatus = useCallback((msg: string, ms = 3200) => {
     setStatusMsg(msg);
@@ -109,11 +120,11 @@ export default function App() {
     if (mode === 'pill') {
       void api.resize({ width: 128, height: 156, anchorSide: 'edge' });
     } else if (mode === 'bar') {
-      void api.resize({ width: 432, height: 192, anchorSide: 'edge' });
+      void api.resize({ width: 432, height: hasRecordingAlert ? 248 : 192, anchorSide: 'edge' });
     } else {
       void api.resize({ width: 900, height: 760, anchorSide: 'center' });
     }
-  }, [mode]);
+  }, [mode, hasRecordingAlert]);
 
   // Warm up microphone pipeline once on boot (auto-defaults to Voicemeeter Out B1 or saved choice)
   useEffect(() => {
@@ -211,21 +222,26 @@ export default function App() {
     setPageImages({});
     setActivePinClipId(null);
     setReviewError('');
-    const loaded = await window.correctorAPI.loadOrCreateSession({
-      studentId: info.id,
-      studentName: info.name,
-      sourcePdfPath: info.sourcePdfPath,
-    });
-    setSession(loaded);
+    try {
+      const loaded = await window.correctorAPI.loadOrCreateSession({
+        studentId: info.id,
+        studentName: info.name,
+        sourcePdfPath: info.sourcePdfPath,
+      });
+      setSession(loaded);
+    } catch {
+      setSession(null);
+    }
   }, []);
 
   // Poll active Xodo / Acrobat window when not manually locked
   useEffect(() => {
     let timer: number | undefined;
     const poll = async () => {
-      if (manualLock || isRecording || modeRef.current === 'review' || !window.correctorAPI) return;
+      if (manualLock || isRecording || togglingRecordRef.current || modeRef.current === 'review' || !window.correctorAPI) return;
       try {
         const res = await window.correctorAPI.detectActiveStudent();
+        if (togglingRecordRef.current) return;
         if (res?.detected && res.detected.studentName) {
           const next = {
             id: res.detected.studentId || '',
@@ -255,86 +271,136 @@ export default function App() {
     return () => window.clearInterval(id);
   }, [isRecording]);
 
-  const toggleRecording = useCallback(async () => {
-    if (busy || togglingRecordRef.current || !window.correctorAPI) return;
+  const toggleRecording = useCallback(async (micInterrupted = false) => {
+    const api = window.correctorAPI;
+    if (busy || togglingRecordRef.current || !api) return;
     togglingRecordRef.current = true;
+    setRecordingTransition(true);
     try {
       if (!isRecording) {
+        setRecordingAlert('');
+        if (!selectedStudent.sourcePdfPath) {
+          warnRecording('التسجيل لم يبدأ. افتح مصحف الطالب أو اختر طالبًا مرتبطًا بمصحف.');
+          return;
+        }
+        flashStatus('جاري التحقق من المصحف...');
+        let targetSession;
         try {
-          if (!recorderRef.current) recorderRef.current = new Mp3VoiceRecorder();
-          const readyFast = recorderRef.current.isReady();
-          if (readyFast) {
-            setIsRecording(true);
-            playSoftTone(1050, 80, 0.06);
-            flashStatus('جاري التسجيل... (F20 للإيقاف)');
-            await recorderRef.current.start();
-          } else {
-            flashStatus('جاري تجهيز المايكروفون...');
-            await recorderRef.current.start();
-            setIsRecording(true);
-            playSoftTone(1050, 80, 0.06);
-            flashStatus('جاري التسجيل... (F20 للإيقاف)');
-          }
-          if (!session) {
-            void window.correctorAPI.loadOrCreateSession({
-              studentId: selectedStudent.id,
-              studentName: selectedStudent.name === 'في انتظار فتح مصحف...' ? 'طالب' : selectedStudent.name,
-              sourcePdfPath: selectedStudent.sourcePdfPath,
-            }).then(setSession).catch(() => {});
+          targetSession = await api.loadOrCreateSession({
+            studentId: selectedStudent.id,
+            studentName: selectedStudent.name,
+            sourcePdfPath: selectedStudent.sourcePdfPath,
+          });
+          if (!targetSession?.sessionKey) throw new Error('Session unavailable');
+          setSession(targetSession);
+        } catch {
+          warnRecording('التسجيل لم يبدأ. تعذّر تجهيز جلسة الطالب لحفظ التسجيل.');
+          return;
+        }
+        const target = { sessionKey: targetSession.sessionKey, sourcePdfPath: selectedStudent.sourcePdfPath };
+        try {
+          const checked = await api.matchAnnotations({ ...target, autoSave: false });
+          if (!checked?.success) {
+            warnRecording(`التسجيل لم يبدأ. ${checked?.error || 'تعذّرت قراءة مصحف الطالب.'}`);
+            return;
           }
         } catch {
-          setIsRecording(false);
-          playSoftTone(300, 220, 0.07);
-          flashStatus('تعذر فتح الميكروفون');
+          warnRecording('التسجيل لم يبدأ. تعذّرت قراءة مصحف الطالب.');
+          return;
+        }
+        try {
+          if (!recorderRef.current) recorderRef.current = new Mp3VoiceRecorder();
+          flashStatus('جاري تجهيز الميكروفون...');
+          await recorderRef.current.start();
+          recordingTargetRef.current = target;
+          setIsRecording(true);
+          playSoftTone(1050, 80, 0.06);
+          flashStatus('جاري التسجيل... (F20 للإيقاف)');
+        } catch {
+          warnRecording('التسجيل لم يبدأ. تعذّر تشغيل الميكروفون.');
         }
         return;
       }
 
-      // Stop recording with immediate visual & audio feedback before MP3 encode/disk save
       const rec = recorderRef.current;
+      const target = recordingTargetRef.current;
+      recordingTargetRef.current = null;
       setIsRecording(false);
-      if (!rec) return;
+      if (!rec || !target) {
+        warnRecording('تعذّر حفظ التسجيل. جلسة التسجيل غير متاحة.');
+        return;
+      }
       flashStatus('جاري حفظ التصحيح...', 2500);
       await new Promise<void>(resolve => window.setTimeout(resolve, 0));
 
+      let saved;
       try {
         const result = await rec.stop();
         if (result.silent || result.bytes.length === 0) {
-          playSoftTone(260, 240, 0.06);
-          flashStatus('تم تجاهل تسجيل صامت');
+          warnRecording(micInterrupted
+            ? 'انقطع الميكروفون أثناء التسجيل ولم يُحفظ مقطع صوتي.'
+            : 'التسجيل صامت ولم يُحفظ. تأكد من اختيار الميكروفون الصحيح.');
           return;
         }
-        let targetSession = session;
-        if (!targetSession) {
-          targetSession = await window.correctorAPI.loadOrCreateSession({
-            studentId: selectedStudent.id,
-            studentName: selectedStudent.name === 'في انتظار فتح مصحف...' ? 'طالب' : selectedStudent.name,
-            sourcePdfPath: selectedStudent.sourcePdfPath,
-          });
-        }
-        if (!targetSession) return;
-        const saved = await window.correctorAPI.addClip({
-          sessionKey: targetSession.sessionKey,
+        saved = await api.addClip({
+          sessionKey: target.sessionKey,
           audioBytes: result.bytes,
           ext: 'mp3',
           startedAt: result.startedAt,
           endedAt: result.endedAt,
           durationMs: result.durationMs,
         });
+        if (!saved?.session || !saved?.clip?.id) throw new Error('Clip was not saved');
         setSession(saved.session);
+      } catch {
+        warnRecording('تعذّر حفظ المقطع الصوتي. حاول تسجيله مرة أخرى.');
+        return;
+      }
+
+      if (micInterrupted) {
+        warnRecording('انقطع الميكروفون أثناء التسجيل. تم حفظ الجزء اللي اتسجّل قبل الانقطاع.');
+        return saved.session;
+      }
+      try {
+        const checked = await api.matchAnnotations({ ...target, autoSave: false });
+        if (!checked?.success) {
+          warnRecording(`التسجيل محفوظ. ${checked?.error || 'تعذّر فحص التظليلات.'}`);
+          return saved.session;
+        }
+        if (checked.unmatchedClips?.some((clip: SessionClip) => clip.id === saved.clip.id)) {
+          warnRecording('التسجيل محفوظ، لكن التظليل مش موجود في آخر نسخة محفوظة. احفظ المصحف أو حدّد الموضع في المعاينة.');
+          return saved.session;
+        }
         playSoftTone(700, 100, 0.06);
+        setRecordingAlert('');
         flashStatus(`تم حفظ التصحيح (${saved.session.clips.length})`);
       } catch {
-        playSoftTone(260, 240, 0.06);
-        flashStatus('تعذر حفظ المقطع الصوتي');
+        warnRecording('التسجيل محفوظ، لكن تعذّر فحص التظليلات في المصحف.');
       }
+      return saved.session;
     } finally {
       togglingRecordRef.current = false;
+      setRecordingTransition(false);
     }
-  }, [busy, isRecording, session, selectedStudent, flashStatus]);
+  }, [busy, isRecording, selectedStudent, flashStatus, warnRecording]);
+
+  useEffect(() => {
+    if (!isRecording) return;
+    let warnedAboutSilence = false;
+    const timer = window.setInterval(() => {
+      const recorder = recorderRef.current;
+      if (recorder?.hasCaptureInterrupted()) {
+        void toggleRecording(true);
+      } else if (!warnedAboutSilence && recorder?.isMissingAudioSignal()) {
+        warnedAboutSilence = true;
+        warnRecording('الميكروفون مش لاقط صوت. تأكد من الميكروفون المختار ومستوى الصوت.');
+      }
+    }, 500);
+    return () => window.clearInterval(timer);
+  }, [isRecording, toggleRecording, warnRecording]);
 
   const handleUndoLast = useCallback(async () => {
-    if (!session || isRecording || !window.correctorAPI) return;
+    if (!session || isRecording || togglingRecordRef.current || !window.correctorAPI) return;
     const res = await window.correctorAPI.removeClip({ sessionKey: session.sessionKey });
     if (res?.removed) {
       setSession(res.session);
@@ -346,7 +412,7 @@ export default function App() {
   }, [session, isRecording, flashStatus]);
 
   const handleRedoLast = useCallback(async () => {
-    if (!session || isRecording || !window.correctorAPI) return;
+    if (!session || isRecording || togglingRecordRef.current || !window.correctorAPI) return;
     const res = await window.correctorAPI.redoClip({ sessionKey: session.sessionKey });
     if (res?.restored) {
       setSession(res.session);
@@ -357,15 +423,15 @@ export default function App() {
     }
   }, [session, isRecording, flashStatus]);
 
-  const openReviewModal = useCallback(async () => {
-    if (!session || !window.correctorAPI) return;
+  const openReviewModal = useCallback(async (sessionKey = session?.sessionKey) => {
+    if (!sessionKey || recordingTargetRef.current || togglingRecordRef.current || !window.correctorAPI) return;
     setBusy(true);
     setMode('review');
     setPageImages({});
     setReviewError('');
     try {
       const matched = await window.correctorAPI.matchAnnotations({
-        sessionKey: session.sessionKey,
+        sessionKey,
         sourcePdfPath: selectedStudent.sourcePdfPath,
         autoSave: true,
       });
@@ -373,7 +439,7 @@ export default function App() {
       if (!matched?.success) {
         const msg = matched?.error || 'لم يتم العثور على ملف PDF مصحف الطالب.';
         setReviewError(msg);
-        flashStatus(msg, 4500);
+        warnRecording(msg);
         return;
       }
       if (matched.unmatchedClips?.length > 0) {
@@ -394,26 +460,27 @@ export default function App() {
         } else {
           const msg = rendered?.error || 'تعذّر عرض صفحات المصحف داخل المعاينة.';
           setReviewError(msg);
-          flashStatus(msg, 4500);
+          warnRecording(msg);
         }
       }
     } catch {
       const msg = 'تعذر تحميل صفحات المعاينة.';
       setReviewError(msg);
-      flashStatus(msg, 4500);
+      warnRecording(msg);
     } finally {
       setBusy(false);
     }
-  }, [session, selectedStudent.sourcePdfPath, flashStatus]);
+  }, [session, selectedStudent.sourcePdfPath, warnRecording]);
 
   const handleExport = useCallback(async (exportMode: 'web_link' | 'html') => {
-    if (!session || !window.correctorAPI) return;
-    if (isRecording) await toggleRecording();
+    if (busy || !session || togglingRecordRef.current || !window.correctorAPI) return;
+    const targetSession = isRecording ? await toggleRecording() : session;
+    if (!targetSession) return;
     setBusy(true);
     flashStatus(exportMode === 'web_link' ? 'جاري التجهيز والرفع كرابط...' : 'جاري إنشاء ملف HTML التفاعلي...');
     try {
       const res = await window.correctorAPI.exportSession({
-        sessionKey: session.sessionKey,
+        sessionKey: targetSession.sessionKey,
         sourcePdfPath: selectedStudent.sourcePdfPath,
         mode: exportMode,
         language: /[\u0600-\u06FF]/.test(selectedStudent.name) ? 'ar' : 'en',
@@ -422,20 +489,23 @@ export default function App() {
       if (res?.success) {
         playSoftTone(1200, 120, 0.06);
         if ((res.unmatchedCount || 0) > 0) {
-          flashStatus(`تم الحفظ، تنبيه: ${res.unmatchedCount} تسجيل بدون تظليل لم يُضف`, 6000);
+          warnRecording(`تم التصدير. لم يُضَف ${res.unmatchedCount} من التسجيلات لعدم ارتباطها بتظليل.`);
         } else {
+          setRecordingAlert('');
           flashStatus(exportMode === 'web_link' ? 'تم رفع ونسخ الرابط بنجاح ✅' : 'تم حفظ ونسخ ملف HTML ✅', 5000);
         }
       } else if (res?.needsManualReview) {
-        flashStatus('لم يتم العثور على تظليل جديد؛ افتح المعاينة لتثبيت العلامة', 4500);
-        await openReviewModal();
+        warnRecording('تعذّر التصدير. حدّد مواضع التسجيلات في المعاينة.');
+        await openReviewModal(targetSession.sessionKey);
       } else {
-        flashStatus(res?.error || 'تعذر التصدير');
+        warnRecording(res?.error || 'تعذّر التصدير.');
       }
+    } catch {
+      warnRecording('تعذّر التصدير. التسجيلات المحفوظة موجودة في الجلسة.');
     } finally {
       setBusy(false);
     }
-  }, [session, isRecording, toggleRecording, selectedStudent.name, flashStatus, openReviewModal]);
+  }, [busy, session, isRecording, toggleRecording, selectedStudent.name, selectedStudent.sourcePdfPath, flashStatus, warnRecording, openReviewModal]);
 
   const shortcutHandlersRef = useRef({
     toggleRecording,
@@ -551,6 +621,15 @@ export default function App() {
 
   const clipsCount = session?.clips?.length || 0;
   const redoCount = session?.undoneClips?.length || 0;
+  const alertBanner = recordingAlert && (
+    <div role="alert" className="flex shrink-0 items-start gap-2 rounded-lg border border-amber-400/40 bg-amber-500/15 px-2.5 py-2 text-xs font-semibold text-amber-100">
+      <Bell aria-hidden="true" size={14} className="mt-0.5 shrink-0" />
+      <span className="min-w-0 flex-1 break-words">{recordingAlert}</span>
+      <button type="button" aria-label="إغلاق التنبيه" onClick={() => setRecordingAlert('')} className="hud-no-drag shrink-0 rounded p-0.5 hover:bg-white/15">
+        <X size={14} />
+      </button>
+    </div>
+  );
 
   // === MODE 1: COLLAPSED EDGE PILL ===
   if (mode === 'pill') {
@@ -625,7 +704,7 @@ export default function App() {
           {/* Main Circular Action Button (Record / Stop / Upload Animation) */}
           <button
             type="button"
-            disabled={busy}
+            disabled={busy || recordingTransition}
             onClick={() => void toggleRecording()}
             style={{
               boxShadow: btnShadow,
@@ -665,7 +744,7 @@ export default function App() {
             title="توسيع شريط المصحح الصوتي"
             className="hud-no-drag w-full rounded-xl py-0.5 px-1 bg-white/10 hover:bg-white/20 text-white text-[11px] font-bold flex items-center justify-center gap-1 transition-colors"
           >
-            <span>{busy ? 'رفع...' : isRecording ? `${recordSeconds}ث` : clipsCount}</span>
+            <span>{busy ? 'رفع...' : recordingTransition ? 'لحظة...' : isRecording ? `${recordSeconds}ث` : clipsCount}</span>
             {!busy && <Volume2 size={11} className="text-emerald-300" />}
           </button>
         </div>
@@ -857,6 +936,7 @@ export default function App() {
             </div>
           </div>
 
+          {alertBanner && <div className="shrink-0 px-5 pb-2">{alertBanner}</div>}
           <div className="shrink-0 px-5 py-3 bg-slate-950/90 border-t border-white/10 flex items-center justify-between gap-3">
             <span className="text-xs text-emerald-300 font-semibold">{statusMsg}</span>
             <div className="flex items-center gap-2">
@@ -907,6 +987,7 @@ export default function App() {
             <div className="relative flex-1 min-w-0 hud-no-drag">
               <select
                 value={selectedStudent.id || selectedStudent.name}
+                disabled={isRecording || recordingTransition || busy}
                 onChange={(e) => {
                   const found = students.find(s => (s.id || s.name) === e.target.value);
                   if (found) {
@@ -946,7 +1027,7 @@ export default function App() {
           <div className="hud-no-drag flex items-center gap-1 shrink-0">
             <button
               type="button"
-              disabled={isRecording}
+              disabled={isRecording || recordingTransition}
               onClick={async () => {
                 setShowUpdateMenu(false);
                 if (!showMicMenu) {
@@ -1154,7 +1235,7 @@ export default function App() {
         <div className="flex items-center gap-1.5 my-1">
           <button
             type="button"
-            disabled={busy}
+            disabled={busy || recordingTransition}
             onClick={() => void toggleRecording()}
             className={`flex-1 min-w-0 py-2 px-2.5 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition-all ${
               isRecording
@@ -1163,7 +1244,7 @@ export default function App() {
             }`}
           >
             {isRecording ? <Square size={14} fill="currentColor" /> : <Mic size={15} />}
-            <span className="truncate">{isRecording ? `إيقاف (${recordSeconds}ث)` : 'تسجيل (F20)'}</span>
+            <span className="truncate">{recordingTransition ? 'لحظة...' : isRecording ? `إيقاف (${recordSeconds}ث)` : 'تسجيل (F20)'}</span>
           </button>
 
           <button
@@ -1219,8 +1300,9 @@ export default function App() {
         </div>
 
         {/* Footer Info Line */}
+        {alertBanner}
         <div className="flex items-center justify-between text-[11px] text-slate-400 px-0.5">
-          <span className="font-semibold text-emerald-300 truncate">{statusMsg || (selectedStudent.sourcePdfPath ? 'جاهز — مرتبط بالمصحف' : 'توجيه يدوي / جاهز للتسجيل')}</span>
+          <span className="font-semibold text-emerald-300 truncate">{hasRecordingAlert ? '' : statusMsg || (selectedStudent.sourcePdfPath ? 'جاهز — مرتبط بالمصحف' : 'افتح مصحف الطالب لبدء التسجيل')}</span>
           <span className="shrink-0 font-bold text-slate-200">التسجيلات: {clipsCount}</span>
         </div>
       </div>

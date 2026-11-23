@@ -89,6 +89,8 @@ export class Mp3VoiceRecorder {
   private chunks: Float32Array[] = [];
   private collecting = false;
   private startedAt = 0;
+  private lastSampleAt = 0;
+  private heardAudio = false;
   private warmPromise: Promise<void> | null = null;
   private activeMic: AudioInputDevice | null = null;
   private preferredMic: { deviceId?: string; label?: string } | null = null;
@@ -144,7 +146,9 @@ export class Mp3VoiceRecorder {
         const processor = ctx.createScriptProcessor(2048, 1, 1);
         processor.onaudioprocess = (ev) => {
           if (!this.collecting) return;
+          this.lastSampleAt = Date.now();
           const input = ev.inputBuffer.getChannelData(0);
+          if (!this.heardAudio) this.heardAudio = input.some(sample => Math.abs(sample) >= SILENCE_THRESHOLD);
           this.chunks.push(new Float32Array(input));
         };
         source.connect(processor);
@@ -174,10 +178,22 @@ export class Mp3VoiceRecorder {
   async start() {
     if (!this.isReady()) {
       await this.warmUp();
+      if (this.ctx?.state === 'suspended') await this.ctx.resume();
     }
+    if (!this.isReady()) throw new Error('Microphone audio stream is unavailable');
     this.chunks = [];
     this.startedAt = Date.now();
+    this.lastSampleAt = this.startedAt;
+    this.heardAudio = false;
     this.collecting = true;
+  }
+
+  hasCaptureInterrupted() {
+    return this.collecting && (!this.isReady() || Date.now() - this.lastSampleAt > 2500);
+  }
+
+  isMissingAudioSignal() {
+    return this.collecting && !this.heardAudio && Date.now() - this.startedAt > 5000;
   }
 
   async stop(): Promise<{
