@@ -453,13 +453,18 @@ function createWindow() {
         if (mainWindow && !mainWindow.isDestroyed()) {
             mainWindow.setSkipTaskbar(false);
         }
+        syncHudVisibleMarker(true);
         updateTrayMenu();
     });
     mainWindow.on('hide', () => {
         if (mainWindow && !mainWindow.isDestroyed()) {
             mainWindow.setSkipTaskbar(true);
         }
+        syncHudVisibleMarker(false);
         updateTrayMenu();
+    });
+    mainWindow.on('closed', () => {
+        syncHudVisibleMarker(false);
     });
     mainWindow.on('close', (ev) => {
         if (moveSaveTimer) {
@@ -492,6 +497,7 @@ function createWindow() {
     } else {
         mainWindow.loadFile(path.join(__dirname, 'dist', 'index.html'));
     }
+    syncHudVisibleMarker(true);
 }
 
 function showHudWindow() {
@@ -644,6 +650,19 @@ function registerShortcuts() {
 }
 
 const HUD_PID_PATH = path.join(path.dirname(HUD_STATE_PATH), 'hud.pid');
+const HUD_VISIBLE_PATH = path.join(path.dirname(HUD_STATE_PATH), 'hud.visible');
+
+function syncHudVisibleMarker(visible) {
+    if (process.platform === 'win32') return;
+    try {
+        if (visible) {
+            fs.mkdirSync(path.dirname(HUD_VISIBLE_PATH), { recursive: true });
+            fs.writeFileSync(HUD_VISIBLE_PATH, String(process.pid), 'utf8');
+        } else if (fs.existsSync(HUD_VISIBLE_PATH) && fs.readFileSync(HUD_VISIBLE_PATH, 'utf8').trim() === String(process.pid)) {
+            fs.unlinkSync(HUD_VISIBLE_PATH);
+        }
+    } catch { /* ignore */ }
+}
 
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!gotSingleInstanceLock) {
@@ -665,6 +684,11 @@ if (!gotSingleInstanceLock) {
         process.on('SIGUSR1', () => {
             toggleHudVisibility();
         });
+        process.on('SIGUSR2', () => {
+            if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) {
+                mainWindow.webContents.send('hud-shortcut', 'toggle-record');
+            }
+        });
     }
     app.on('activate', () => {
         if (mainWindow && !mainWindow.isDestroyed()) {
@@ -680,6 +704,7 @@ app.on('before-quit', () => {
 });
 
 app.on('will-quit', () => {
+    syncHudVisibleMarker(false);
     try {
         if (fs.existsSync(HUD_PID_PATH) && fs.readFileSync(HUD_PID_PATH, 'utf8').trim() === String(process.pid)) {
             fs.unlinkSync(HUD_PID_PATH);

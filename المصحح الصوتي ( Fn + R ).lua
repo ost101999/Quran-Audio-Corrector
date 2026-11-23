@@ -1,17 +1,29 @@
--- Toggle / Summon المصحح الصوتي with Right Command (mapped to Fn) + R.
+-- Toggle / Summon المصحح الصوتي with Right Command (mapped to Fn) + R,
+-- and toggle Recording with F3 (Mission Control key without Fn) only while the HUD is visible.
 local DEV_COMMAND_PATH = "/Users/omarsherif/My Apps/المصحح الصوتي/project/dev.command"
 local PACKAGED_APP_PATH = "/Applications/المصحح الصوتي.app"
-local HUD_PID_PATH = (os.getenv("HOME") or "") .. "/.quran-audio-corrector/hud.pid"
+local STATE_DIR = (os.getenv("HOME") or "") .. "/.quran-audio-corrector"
+local HUD_PID_PATH = STATE_DIR .. "/hud.pid"
+local HUD_VISIBLE_PATH = STATE_DIR .. "/hud.visible"
+local MISSION_CONTROL_KEYCODE = 160
 
 local isLaunchingCorrector = false
+local consumedRecordKeyUp = false
 
-local function readHudPid()
-    local f = io.open(HUD_PID_PATH, "r")
+local function readPidFile(path)
+    local f = io.open(path, "r")
     if not f then return nil end
     local raw = f:read("*a")
     f:close()
-    local pid = raw and raw:match("^(%d+)")
-    return pid
+    return raw and raw:match("^(%d+)") or nil
+end
+
+local function isHudVisible()
+    return readPidFile(HUD_VISIBLE_PATH) ~= nil
+end
+
+local function hasNoModifiers(flags)
+    return not flags.cmd and not flags.alt and not flags.ctrl and not flags.shift
 end
 
 local function launchCorrector()
@@ -41,10 +53,12 @@ local function launchCorrector()
 end
 
 local function toggleAudioCorrector()
-    local pid = readHudPid()
+    local pid = readPidFile(HUD_PID_PATH)
     if pid then
         local task = hs.task.new("/bin/kill", function(exitCode)
             if exitCode ~= 0 then
+                os.remove(HUD_VISIBLE_PATH)
+                os.remove(HUD_PID_PATH)
                 launchCorrector()
             end
         end, { "-USR1", pid })
@@ -56,7 +70,24 @@ local function toggleAudioCorrector()
     launchCorrector()
 end
 
+local function triggerAudioRecord()
+    local pid = readPidFile(HUD_VISIBLE_PATH) or readPidFile(HUD_PID_PATH)
+    if not pid then
+        return
+    end
+    local task = hs.task.new("/bin/kill", function(exitCode)
+        if exitCode ~= 0 then
+            os.remove(HUD_VISIBLE_PATH)
+            os.remove(HUD_PID_PATH)
+        end
+    end, { "-USR2", pid })
+    if task then
+        task:start()
+    end
+end
+
 _G.toggleAudioCorrector = toggleAudioCorrector
+_G.triggerAudioRecord = triggerAudioRecord
 
 if _G.toggleAudioCorrectorTap then
     _G.toggleAudioCorrectorTap:stop()
@@ -88,3 +119,72 @@ _G.toggleAudioCorrectorTap = hs.eventtap.new({ hs.eventtap.event.types.keyDown }
 end)
 
 _G.toggleAudioCorrectorTap:start()
+
+if _G.audioCorrectorRecordKeyTap then
+    _G.audioCorrectorRecordKeyTap:stop()
+end
+
+_G.audioCorrectorRecordKeyTap = hs.eventtap.new({
+    hs.eventtap.event.types.keyDown,
+    hs.eventtap.event.types.keyUp
+}, function(event)
+    if event:getKeyCode() ~= MISSION_CONTROL_KEYCODE then
+        return false
+    end
+
+    local eventType = event:getType()
+    if eventType == hs.eventtap.event.types.keyUp then
+        if consumedRecordKeyUp then
+            consumedRecordKeyUp = false
+            return true
+        end
+        return false
+    end
+
+    if not hasNoModifiers(event:getFlags()) or not isHudVisible() then
+        return false
+    end
+
+    if event:getProperty(hs.eventtap.event.properties.keyboardEventAutorepeat) ~= 0 then
+        return true
+    end
+
+    consumedRecordKeyUp = true
+    hs.timer.doAfter(0, triggerAudioRecord)
+    return true
+end)
+
+_G.audioCorrectorRecordKeyTap:start()
+
+if _G.audioCorrectorRecordSysTap then
+    _G.audioCorrectorRecordSysTap:stop()
+end
+
+_G.audioCorrectorRecordSysTap = hs.eventtap.new({ hs.eventtap.event.types.NSSystemDefined }, function(event)
+    local ok, sysKey = pcall(event.systemKey, event)
+    if not ok or not sysKey or sysKey.key ~= "EXPOSE_ALL" then
+        return false
+    end
+
+    if not sysKey.down then
+        if consumedRecordKeyUp then
+            consumedRecordKeyUp = false
+            return true
+        end
+        return false
+    end
+
+    if not hasNoModifiers(event:getFlags()) or not isHudVisible() then
+        return false
+    end
+
+    if sysKey["repeat"] then
+        return true
+    end
+
+    consumedRecordKeyUp = true
+    hs.timer.doAfter(0, triggerAudioRecord)
+    return true
+end)
+
+_G.audioCorrectorRecordSysTap:start()
