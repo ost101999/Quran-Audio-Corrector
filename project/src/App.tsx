@@ -168,23 +168,29 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [showMicMenu, showUpdateMenu]);
 
-  const checkAppUpdates = useCallback(async () => {
+  const checkAppUpdates = useCallback(async (silent = false) => {
     if (!window.correctorAPI?.checkForUpdates) return;
-    setCheckingUpdate(true);
+    if (!silent) setCheckingUpdate(true);
     try {
       const res = await window.correctorAPI.checkForUpdates();
-      setUpdateInfo(res);
+      setUpdateInfo(prev => (silent && res.status === 'error' && prev?.status ? prev : res));
     } catch {
-      setUpdateInfo(prev => ({ status: 'error', current: prev?.current }));
+      if (!silent) {
+        setUpdateInfo(prev => ({ status: 'error', current: prev?.current }));
+      }
     } finally {
-      setCheckingUpdate(false);
+      if (!silent) setCheckingUpdate(false);
     }
   }, []);
 
-  // Load students list and silently check for commit-based updates on boot
+  // Load students list, check updates on boot, and re-check silently every 30 minutes
   useEffect(() => {
     window.correctorAPI?.listStudents().then(setStudents).catch(() => {});
-    void checkAppUpdates();
+    void checkAppUpdates(false);
+    const timer = window.setInterval(() => {
+      void checkAppUpdates(true);
+    }, 30 * 60 * 1000);
+    return () => window.clearInterval(timer);
   }, [checkAppUpdates]);
 
   // Ensure a session exists whenever selectedStudent changes
