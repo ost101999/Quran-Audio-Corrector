@@ -235,8 +235,9 @@ function registerDevMode({ app, ipcMain, dialog, getMainWindow, onStatusChange }
   };
 
   const clearProjectCache = (root) => {
-    const normalizedRoot = path.resolve(root) + path.sep;
-    const nmPrefix = path.join(root, 'node_modules') + path.sep;
+    const realRoot = fs.realpathSync(root);
+    const normalizedRoot = realRoot + path.sep;
+    const nmPrefix = path.join(realRoot, 'node_modules') + path.sep;
     for (const cachedKey of Object.keys(require.cache)) {
       if (cachedKey.startsWith(normalizedRoot) && !cachedKey.startsWith(nmPrefix)) {
         delete require.cache[cachedKey];
