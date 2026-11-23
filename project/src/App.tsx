@@ -98,6 +98,9 @@ export default function App() {
   modeRef.current = mode;
   const hasRecordingAlert = Boolean(recordingAlert);
   const togglingRecordRef = useRef(false);
+  const preparingRecordingRef = useRef(false);
+  const captureStartRef = useRef<Promise<void> | null>(null);
+  const pendingStopRef = useRef<ReturnType<Mp3VoiceRecorder['stop']> | null>(null);
   const recordingTargetRef = useRef<{ sessionKey: string; sourcePdfPath: string } | null>(null);
 
   const warnRecording = useCallback((message: string) => {
@@ -273,7 +276,16 @@ export default function App() {
 
   const toggleRecording = useCallback(async (micInterrupted = false) => {
     const api = window.correctorAPI;
-    if (busy || togglingRecordRef.current || !api) return;
+    if (togglingRecordRef.current) {
+      if (preparingRecordingRef.current && !pendingStopRef.current && recorderRef.current) {
+        const recorder = recorderRef.current;
+        pendingStopRef.current = (captureStartRef.current || Promise.resolve()).then(() => recorder.stop());
+        void pendingStopRef.current.catch(() => {});
+        setIsRecording(false);
+      }
+      return;
+    }
+    if (busy || !api) return;
     togglingRecordRef.current = true;
     setRecordingTransition(true);
     try {
@@ -283,6 +295,20 @@ export default function App() {
           warnRecording('التسجيل لم يبدأ. افتح مصحف الطالب أو اختر طالبًا مرتبطًا بمصحف.');
           return;
         }
+        if (!recorderRef.current) recorderRef.current = new Mp3VoiceRecorder();
+        const recorder = recorderRef.current;
+        preparingRecordingRef.current = true;
+        pendingStopRef.current = null;
+        const capture = recorder.start();
+        captureStartRef.current = capture;
+        void capture.catch(() => {});
+        void capture.then(() => {
+          if (preparingRecordingRef.current && !pendingStopRef.current) {
+            setIsRecording(true);
+            playSoftTone(1050, 80, 0.06);
+            flashStatus('جاري التسجيل والتحقق من المصحف...');
+          }
+        }).catch(() => {});
         flashStatus('جاري التحقق من المصحف...');
         let targetSession;
         try {
@@ -294,6 +320,12 @@ export default function App() {
           if (!targetSession?.sessionKey) throw new Error('Session unavailable');
           setSession(targetSession);
         } catch {
+          await capture.catch(() => {});
+          recorder.discard();
+          setIsRecording(false);
+          preparingRecordingRef.current = false;
+          captureStartRef.current = null;
+          pendingStopRef.current = null;
           warnRecording('التسجيل لم يبدأ. تعذّر تجهيز جلسة الطالب لحفظ التسجيل.');
           return;
         }
@@ -301,22 +333,50 @@ export default function App() {
         try {
           const checked = await api.matchAnnotations({ ...target, autoSave: false });
           if (!checked?.success) {
-            warnRecording(`التسجيل لم يبدأ. ${checked?.error || 'تعذّرت قراءة مصحف الطالب.'}`);
-            return;
+            throw new Error(checked?.error || 'تعذّرت قراءة مصحف الطالب.');
           }
-        } catch {
-          warnRecording('التسجيل لم يبدأ. تعذّرت قراءة مصحف الطالب.');
+        } catch (error) {
+          await capture.catch(() => {});
+          recorder.discard();
+          setIsRecording(false);
+          preparingRecordingRef.current = false;
+          captureStartRef.current = null;
+          pendingStopRef.current = null;
+          warnRecording(`التسجيل لم يبدأ. ${error instanceof Error ? error.message : 'تعذّرت قراءة مصحف الطالب.'}`);
           return;
         }
         try {
-          if (!recorderRef.current) recorderRef.current = new Mp3VoiceRecorder();
-          flashStatus('جاري تجهيز الميكروفون...');
-          await recorderRef.current.start();
+          await capture;
+          preparingRecordingRef.current = false;
+          captureStartRef.current = null;
+          const pendingStop = pendingStopRef.current as ReturnType<Mp3VoiceRecorder['stop']> | null;
+          pendingStopRef.current = null;
+          if (pendingStop) {
+            try {
+              const result = await pendingStop;
+              if (result.silent || result.bytes.length === 0) {
+                warnRecording('التسجيل صامت ولم يُحفظ. تأكد من اختيار الميكروفون الصحيح.');
+                return;
+              }
+              const saved = await api.addClip({ sessionKey: target.sessionKey, audioBytes: result.bytes, ext: 'mp3', startedAt: result.startedAt, endedAt: result.endedAt, durationMs: result.durationMs });
+              if (!saved?.session || !saved?.clip?.id) throw new Error('Clip was not saved');
+              setSession(saved.session);
+              flashStatus(`تم حفظ التسجيل (${saved.session.clips.length})`);
+              return saved.session;
+            } catch {
+              warnRecording('تعذّر حفظ المقطع الصوتي. حاول تسجيله مرة أخرى.');
+              return;
+            }
+          }
           recordingTargetRef.current = target;
           setIsRecording(true);
-          playSoftTone(1050, 80, 0.06);
           flashStatus('جاري التسجيل... (F20 للإيقاف)');
         } catch {
+          preparingRecordingRef.current = false;
+          captureStartRef.current = null;
+          pendingStopRef.current = null;
+          recorder.discard();
+          setIsRecording(false);
           warnRecording('التسجيل لم يبدأ. تعذّر تشغيل الميكروفون.');
         }
         return;
@@ -691,7 +751,7 @@ export default function App() {
           {/* Main Circular Action Button (Record / Stop / Upload Animation) */}
           <button
             type="button"
-            disabled={busy || recordingTransition}
+            disabled={busy || (recordingTransition && !preparingRecordingRef.current)}
             onClick={() => void toggleRecording()}
             style={{
               boxShadow: btnShadow,
@@ -731,7 +791,7 @@ export default function App() {
             title="توسيع شريط المصحح الصوتي"
             className="hud-no-drag w-full rounded-xl py-0.5 px-1 bg-white/10 hover:bg-white/20 text-white text-[11px] font-bold flex items-center justify-center gap-1 transition-colors"
           >
-            <span>{busy ? 'رفع...' : recordingTransition ? 'لحظة...' : isRecording ? `${recordSeconds}ث` : clipsCount}</span>
+            <span>{busy ? 'رفع...' : isRecording ? `${recordSeconds}ث` : recordingTransition ? 'لحظة...' : clipsCount}</span>
             {!busy && <Volume2 size={11} className="text-emerald-300" />}
           </button>
         </div>
@@ -1222,7 +1282,7 @@ export default function App() {
         <div className="flex items-center gap-1.5 my-1">
           <button
             type="button"
-            disabled={busy || recordingTransition}
+            disabled={busy || (recordingTransition && !preparingRecordingRef.current)}
             onClick={() => void toggleRecording()}
             className={`flex-1 min-w-0 py-2 px-2.5 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition-all ${
               isRecording

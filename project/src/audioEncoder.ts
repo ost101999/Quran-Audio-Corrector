@@ -196,6 +196,11 @@ export class Mp3VoiceRecorder {
     return this.collecting && !this.heardAudio && Date.now() - this.startedAt > 5000;
   }
 
+  discard() {
+    this.collecting = false;
+    this.chunks = [];
+  }
+
   async stop(): Promise<{
     silent: boolean;
     bytes: Uint8Array | number[];

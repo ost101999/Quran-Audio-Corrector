@@ -519,6 +519,7 @@ function showHudWindow() {
         app.focus({ steal: true });
     }
     mainWindow.focus();
+    mainWindow.webContents.focus();
 }
 
 function hideHudWindow() {
