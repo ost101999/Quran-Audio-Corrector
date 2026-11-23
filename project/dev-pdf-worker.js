@@ -5,7 +5,7 @@ const { PDFDocument } = require('pdf-lib');
 const {
   extractPdfAnnotations,
   matchClipsToAnnotations,
-  recolorAnnotationsToGreenInPdfBytes,
+  prepareCorrectionPdfForRendering,
   mergeReportAndAudioSections,
 } = require('./core/annotation-matcher');
 const {
@@ -99,7 +99,9 @@ app.whenReady().then(async () => {
 
     const allowedSet = new Set(merged.allPdfPages);
     const filteredRecolor = (matched.unmatchedNewAnnotations || []).filter(a => allowedSet.has(a.pdfPage));
-    const renderBytes = await recolorAnnotationsToGreenInPdfBytes(sourceBytes, filteredRecolor);
+    const renderBytes = await prepareCorrectionPdfForRendering(
+      sourceBytes, filteredRecolor, merged.allPdfPages
+    );
 
     const cropPlanMap = new Map();
     const cropRequests = [];

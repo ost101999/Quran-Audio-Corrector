@@ -99,13 +99,8 @@ _G.toggleAudioCorrectorTap = hs.eventtap.new({ hs.eventtap.event.types.keyDown }
     end
 
     local flags = event:getFlags()
-    local rawFlags = event:rawFlags()
-    -- Physical Right Command is remapped to Fn by Right Command to Fn.lua.
-    local rightCommand = (rawFlags & 0x10) ~= 0
-    local leftCommand = (rawFlags & 0x08) ~= 0
-    local fnPressed = (flags.fn and not flags.cmd) or (rightCommand and not leftCommand and not flags.fn)
-
-    if not fnPressed or flags.shift or flags.alt or flags.ctrl then
+    -- macOS delivers physical Right Command as Fn with the active HID mapping.
+    if not flags.fn or flags.cmd or flags.shift or flags.alt or flags.ctrl then
         return false
     end
 

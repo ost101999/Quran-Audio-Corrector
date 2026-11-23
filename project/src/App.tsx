@@ -361,22 +361,9 @@ export default function App() {
         warnRecording('انقطع الميكروفون أثناء التسجيل. تم حفظ الجزء اللي اتسجّل قبل الانقطاع.');
         return saved.session;
       }
-      try {
-        const checked = await api.matchAnnotations({ ...target, autoSave: false });
-        if (!checked?.success) {
-          warnRecording(`التسجيل محفوظ. ${checked?.error || 'تعذّر فحص التظليلات.'}`);
-          return saved.session;
-        }
-        if (checked.unmatchedClips?.some((clip: SessionClip) => clip.id === saved.clip.id)) {
-          warnRecording('التسجيل محفوظ، لكن التظليل مش موجود في آخر نسخة محفوظة. احفظ المصحف أو حدّد الموضع في المعاينة.');
-          return saved.session;
-        }
-        playSoftTone(700, 100, 0.06);
-        setRecordingAlert('');
-        flashStatus(`تم حفظ التصحيح (${saved.session.clips.length})`);
-      } catch {
-        warnRecording('التسجيل محفوظ، لكن تعذّر فحص التظليلات في المصحف.');
-      }
+      playSoftTone(700, 100, 0.06);
+      setRecordingAlert('');
+      flashStatus(`تم حفظ التسجيل (${saved.session.clips.length})`);
       return saved.session;
     } finally {
       togglingRecordRef.current = false;

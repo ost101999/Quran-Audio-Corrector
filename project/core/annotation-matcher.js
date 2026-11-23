@@ -1,5 +1,5 @@
 const zlib = require('node:zlib');
-const { PDFDocument, PDFName, PDFNumber, PDFRawStream } = require('pdf-lib');
+const { PDFDict, PDFDocument, PDFName, PDFNumber, PDFRawStream, cmyk, decodePDFRawStream, drawEllipse, rgb } = require('pdf-lib');
 
 const ANNOTATION_SUBTYPES = new Set([
     '/Ink',
@@ -309,67 +309,145 @@ function matchClipsToAnnotations(clips = [], annotations = [], { sessionStartedA
 }
 
 /**
- * Recolors specified annotations (e.g., yellow highlights with no voice clip)
- * to translucent green [0, 1, 0] in an in-memory copy of the PDF without touching disk files.
+ * Copies a recolored appearance, including nested Form XObjects used by Acrobat.
+ * PDF objects can be shared by several annotations, so copy only the changed branches.
  */
-async function recolorAnnotationsToGreenInPdfBytes(pdfBytes, targetAnnotations = []) {
-    if (!targetAnnotations || targetAnnotations.length === 0) return pdfBytes;
-    const doc = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
-    const pageCount = doc.getPageCount();
-    const byPage = new Map();
-    for (const item of targetAnnotations) {
-        if (!Number.isInteger(item?.pdfPage) || !Number.isInteger(item?.indexInPage)) continue;
-        if (item.pdfPage < 1 || item.pdfPage > pageCount) continue;
-        if (!byPage.has(item.pdfPage)) byPage.set(item.pdfPage, new Set());
-        byPage.get(item.pdfPage).add(item.indexInPage);
+function recolorAppearance(form, color, ancestors = new Set()) {
+    if (!(form instanceof PDFRawStream) || ancestors.has(form)) return null;
+    let original;
+    try {
+        original = Buffer.from(decodePDFRawStream(form).decode()).toString('latin1');
+    } catch {
+        return null;
     }
-    if (byPage.size === 0) return pdfBytes;
 
-    for (const [pdfPage, idxSet] of byPage.entries()) {
-        const page = doc.getPage(pdfPage - 1);
-        const annotsObj = page.node.lookup(PDFName.of('Annots'));
-        if (!annotsObj || typeof annotsObj.asArray !== 'function') continue;
-        const refs = annotsObj.asArray();
-        for (const idx of idxSet) {
-            if (idx < 0 || idx >= refs.length) continue;
-            const obj = doc.context.lookup(refs[idx]);
-            if (!obj || typeof obj.set !== 'function') continue;
-            obj.set(PDFName.of('C'), doc.context.obj([0, 1, 0]));
+    const colorCommands = /(^|\s)((?:[+-]?(?:\d+\.?\d*|\.\d+)\s+){3,4})(RG|rg|K|k|SCN|scn)(?=\s|$)/g;
+    const updated = original.replace(colorCommands, (command, prefix, operands, operator) => {
+        const sourceColor = operands.trim().split(/\s+/).map(Number);
+        if (!isYellowRgb(sourceColor)) return command;
+        if (/^[Kk]$/.test(operator)) {
+            return sourceColor.length === 4
+                ? prefix + color.map(value => 1 - value).join(' ') + ' 0 ' + operator
+                : command;
+        }
+        return sourceColor.length === 3 ? prefix + color.join(' ') + ' ' + operator : command;
+    });
 
-            const apRef = obj.get(PDFName.of('AP'));
-            if (!apRef) continue;
-            try {
-                const ap = doc.context.lookup(apRef);
-                const nRef = ap && typeof ap.get === 'function' ? ap.get(PDFName.of('N')) : null;
-                const nStream = nRef ? doc.context.lookup(nRef) : null;
-                if (nStream instanceof PDFRawStream) {
-                    const filterStr = String(nStream.dict.get(PDFName.of('Filter')) || '');
-                    const rawContents = nStream.contents;
-                    let text = null;
-                    let deflated = false;
-                    if (filterStr.includes('FlateDecode')) {
-                        text = zlib.inflateSync(rawContents).toString('latin1');
-                        deflated = true;
-                    } else if (!filterStr || filterStr === 'undefined') {
-                        text = Buffer.from(rawContents).toString('latin1');
-                    }
-                    if (text !== null) {
-                        const updatedText = text.replace(/\b1(?:\.0+)?\s+1(?:\.0+)?\s+0(?:\.0+)?\s+(RG|rg|SCN|scn)\b/g, '0 1 0 $1');
-                        if (updatedText !== text) {
-                            const outBuf = deflated
-                                ? zlib.deflateSync(Buffer.from(updatedText, 'latin1'))
-                                : Buffer.from(updatedText, 'latin1');
-                            nStream.contents = new Uint8Array(outBuf);
-                            nStream.dict.set(PDFName.of('Length'), PDFNumber.of(outBuf.length));
-                        }
-                    }
-                }
-            } catch {
-                try { obj.delete(PDFName.of('AP')); } catch { /* ignore */ }
-            }
+    const resources = form.dict.lookup(PDFName.of('Resources'));
+    const xObjects = resources instanceof PDFDict ? resources.lookup(PDFName.of('XObject')) : null;
+    const context = form.dict.context;
+    let updatedXObjects;
+    if (xObjects instanceof PDFDict) {
+        const parents = new Set(ancestors).add(form);
+        const formNames = new Set([...original.matchAll(/\/([^\s/()[\]<>%]+)\s+Do(?=\s|$)/g)].map(match => match[1]));
+        for (const name of formNames) {
+            const key = PDFName.of(name);
+            const nested = xObjects.lookup(key);
+            if (!(nested instanceof PDFRawStream) || nested.dict.get(PDFName.of('Subtype')) !== PDFName.of('Form')) continue;
+            const recolored = recolorAppearance(nested, color, parents);
+            if (!recolored) continue;
+            updatedXObjects ??= xObjects.clone();
+            updatedXObjects.set(key, context.register(recolored));
         }
     }
-    return await doc.save();
+
+    if (updated === original && !updatedXObjects) return null;
+    const dict = form.dict.clone();
+    if (updatedXObjects) {
+        const updatedResources = resources.clone();
+        updatedResources.set(PDFName.of('XObject'), updatedXObjects);
+        dict.set(PDFName.of('Resources'), updatedResources);
+    }
+    const contents = zlib.deflateSync(Buffer.from(updated, 'latin1'));
+    dict.set(PDFName.of('Filter'), PDFName.of('FlateDecode'));
+    dict.delete(PDFName.of('DecodeParms'));
+    dict.set(PDFName.of('Length'), PDFNumber.of(contents.length));
+    return PDFRawStream.of(dict, contents);
+}
+
+// Acrobat writes a stationary marker gesture as repeated coordinates in an Ink annotation.
+// Give those marks a filled appearance so the word reads the same as under a moving marker.
+function makeFilledInkDot(annotation, color, context) {
+    if (annotation.lookup(PDFName.of('Subtype')) !== PDFName.of('Ink')) return null;
+    const inkList = annotation.lookup(PDFName.of('InkList'));
+    if (inkList?.size?.() !== 1) return null;
+
+    const points = parsePdfNumberArray(inkList.lookup(0));
+    if (!points || points.length < 2 || points.length % 2 !== 0) return null;
+    const [x, y] = points;
+    if (!points.every((coordinate, index) => coordinate === points[index % 2])) return null;
+
+    const style = annotation.lookup(PDFName.of('BS'));
+    const width = style instanceof PDFDict ? style.lookup(PDFName.of('W'))?.asNumber?.() : null;
+    const rect = parsePdfNumberArray(annotation.lookup(PDFName.of('Rect')));
+    if (!(width > 0) || !rect || rect.length !== 4) return null;
+
+    const [left, bottom, right, top] = rect;
+    if (right <= left || top <= bottom) return null;
+    const opacity = annotation.lookup(PDFName.of('CA'))?.asNumber?.() ?? 1;
+    const graphicsState = PDFName.of('Marker');
+    const draw = drawEllipse({
+        x: x - left,
+        y: y - bottom,
+        xScale: width / 2,
+        yScale: width / 2,
+        borderWidth: 0,
+        color: color.length === 3 ? rgb(...color) : cmyk(...color),
+        graphicsState,
+    });
+    return context.flateStream(draw.join('\n'), {
+        Type: 'XObject',
+        Subtype: 'Form',
+        BBox: [0, 0, right - left, top - bottom],
+        Resources: { ExtGState: { Marker: { Type: 'ExtGState', BM: 'Multiply', ca: opacity } } },
+    });
+}
+
+async function prepareCorrectionPdfForRendering(pdfBytes, unmatchedAnnotations = [], pageNumbers = []) {
+    const pagesToRender = new Set(Array.isArray(pageNumbers) ? pageNumbers : []);
+    const greenByPage = new Map();
+    for (const { pdfPage, indexInPage } of Array.isArray(unmatchedAnnotations) ? unmatchedAnnotations : []) {
+        if (!greenByPage.has(pdfPage)) greenByPage.set(pdfPage, new Set());
+        greenByPage.get(pdfPage).add(indexInPage);
+    }
+    const pagesToProcess = new Set([...pagesToRender, ...greenByPage.keys()]);
+    if (pagesToProcess.size === 0) return pdfBytes;
+
+    const doc = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
+    const pageCount = doc.getPageCount();
+    let changed = false;
+    for (const pdfPage of pagesToProcess) {
+        if (!Number.isInteger(pdfPage) || pdfPage < 1 || pdfPage > pageCount) continue;
+        const annots = doc.getPage(pdfPage - 1).node.lookup(PDFName.of('Annots'));
+        if (typeof annots?.size !== 'function') continue;
+        const green = greenByPage.get(pdfPage);
+        for (let index = 0; index < annots.size(); index++) {
+            const recolor = green?.has(index);
+            if (!recolor && !pagesToRender.has(pdfPage)) continue;
+            const obj = annots.lookup(index);
+            if (!(obj instanceof PDFDict)) continue;
+            const originalColor = parsePdfNumberArray(obj.lookup(PDFName.of('C')));
+            if (!isYellowRgb(originalColor)) continue;
+
+            const color = recolor ? [0, 1, 0] : originalColor;
+            const appearance = obj.lookup(PDFName.of('AP'));
+            let normal = makeFilledInkDot(obj, color, doc.context);
+            if (recolor) {
+                obj.set(PDFName.of('C'), doc.context.obj(color));
+                changed = true;
+                if (!normal && appearance instanceof PDFDict) {
+                    normal = recolorAppearance(appearance.lookup(PDFName.of('N')), color);
+                }
+            }
+            if (!normal) continue;
+
+            const updatedAppearance = appearance instanceof PDFDict ? appearance.clone() : doc.context.obj({});
+            updatedAppearance.set(PDFName.of('N'), doc.context.register(normal));
+            obj.set(PDFName.of('AP'), updatedAppearance);
+            changed = true;
+        }
+    }
+    return changed ? doc.save() : pdfBytes;
 }
 
 function defaultMapPages(startPage, endPage, pdfPageCount, offset = 0) {
@@ -495,7 +573,8 @@ module.exports = {
     rectToPagePercent,
     extractPdfAnnotations,
     matchClipsToAnnotations,
-    recolorAnnotationsToGreenInPdfBytes,
+    recolorAnnotationsToGreenInPdfBytes: prepareCorrectionPdfForRendering,
+    prepareCorrectionPdfForRendering,
     mergeReportAndAudioSections,
     clamp,
 };

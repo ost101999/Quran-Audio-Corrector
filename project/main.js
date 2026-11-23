@@ -6,12 +6,6 @@ const path = require('node:path');
 const os = require('node:os');
 const { execFile, spawn } = require('node:child_process');
 const {
-    extractPdfAnnotations,
-    matchClipsToAnnotations,
-    recolorAnnotationsToGreenInPdfBytes,
-    mergeReportAndAudioSections,
-} = require('./core/annotation-matcher');
-const {
     SESSIONS_ROOT_DIR,
     HUD_STATE_PATH,
     loadHudState,
@@ -977,10 +971,9 @@ ipcMain.handle('session:render-pages', async (_event, { sourcePdfPath, pageNumbe
     try {
         const matcher = loadLiveCore('./core/annotation-matcher');
         const pub = loadLiveCore('./core/publisher');
-        let pdfBytes = null;
-        if (Array.isArray(recolorAnnotations) && recolorAnnotations.length > 0 && sourcePdfPath && fs.existsSync(sourcePdfPath)) {
-            pdfBytes = await matcher.recolorAnnotationsToGreenInPdfBytes(fs.readFileSync(sourcePdfPath), recolorAnnotations);
-        }
+        const pdfBytes = sourcePdfPath && fs.existsSync(sourcePdfPath)
+            ? await matcher.prepareCorrectionPdfForRendering(fs.readFileSync(sourcePdfPath), recolorAnnotations, pageNumbers)
+            : null;
         const images = await pub.renderPdfPagesToImages({
             BrowserWindow,
             pdfPath: sourcePdfPath,
@@ -1036,7 +1029,7 @@ ipcMain.handle('session:export', async (_event, { sessionKey, sourcePdfPath, mod
         markers,
         unmatchedNewAnnotations,
     });
-    const recoloredBytes = await matcher.recolorAnnotationsToGreenInPdfBytes(rawPdfBytes, unmatchedNewAnnotations);
+    const recoloredBytes = await matcher.prepareCorrectionPdfForRendering(rawPdfBytes, unmatchedNewAnnotations, allPdfPages);
     const renderedImages = await pub.renderPdfPagesToImages({
         BrowserWindow,
         pdfPath: readablePdfPath,

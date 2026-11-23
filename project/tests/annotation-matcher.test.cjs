@@ -1,12 +1,12 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { PDFDocument, PDFName } = require('pdf-lib');
+const { PDFDocument, PDFName, decodePDFRawStream } = require('pdf-lib');
 const {
   parsePdfDate,
   rectToPagePercent,
   extractPdfAnnotations,
   matchClipsToAnnotations,
-  recolorAnnotationsToGreenInPdfBytes,
+  prepareCorrectionPdfForRendering,
   mergeReportAndAudioSections,
 } = require('../core/annotation-matcher');
 const { publishAudioSessionToCloud, buildInteractiveHtml } = require('../core/publisher');
@@ -229,15 +229,18 @@ test('session undo (F22), redo (F21), and hud-state persistence work reliably', 
   }
 });
 
-test('unmatched new yellow highlights are detected and recolored to green [0, 1, 0] in memory', async () => {
-  const zlib = require('node:zlib');
+test('unlinked ink recolors nested Acrobat appearances without changing linked ink', async () => {
   const doc = await PDFDocument.create();
   doc.addPage([500, 1000]);
   doc.addPage([500, 1000]);
 
-  const ap1 = doc.context.flateStream(zlib.deflateSync(Buffer.from('/G0 gs\n1 1 0 RG\n24 w\n10 10 m 50 10 l S', 'latin1')));
-  const ap2 = doc.context.flateStream(zlib.deflateSync(Buffer.from('/G0 gs\n1 1 0 RG\n24 w\n20 20 m 80 20 l S', 'latin1')));
-
+  const colorStream = doc.context.register(doc.context.flateStream(
+    '1 .756866 0 RG\n24 w\n10 10 m 50 10 l S',
+    { Type: 'XObject', Subtype: 'Form', BBox: [0, 0, 100, 100] },
+  ));
+  const appearance = doc.context.register(doc.context.flateStream('/Stroke Do', {
+    Resources: { XObject: { Stroke: colorStream } },
+  }));
   const t1 = Date.UTC(2026, 10, 22, 0, 10, 0);
   const t2 = Date.UTC(2026, 10, 22, 0, 12, 0); // No audio clip -> memorization highlight
 
@@ -245,16 +248,16 @@ test('unmatched new yellow highlights are detected and recolored to green [0, 1,
     Type: 'Annot',
     Subtype: 'Ink',
     Rect: [100, 600, 200, 640],
-    C: [1, 1, 0],
-    AP: { N: doc.context.register(ap1) },
+    C: [1, 0.756866, 0],
+    AP: { N: appearance },
     CreationDate: 'D:20261122001002Z',
   }));
   const a2 = doc.context.register(doc.context.obj({
     Type: 'Annot',
     Subtype: 'Ink',
     Rect: [150, 400, 250, 440],
-    C: [1, 1, 0],
-    AP: { N: doc.context.register(ap2) },
+    C: [1, 0.756866, 0],
+    AP: { N: appearance },
     CreationDate: 'D:20261122001200Z',
   }));
   doc.getPage(0).node.set(PDFName.of('Annots'), doc.context.obj([a1]));
@@ -270,13 +273,59 @@ test('unmatched new yellow highlights are detected and recolored to green [0, 1,
   assert.equal(unmatchedNewAnnotations.length, 1);
   assert.equal(unmatchedNewAnnotations[0].pdfPage, 2);
 
-  const recoloredBytes = await recolorAnnotationsToGreenInPdfBytes(origBytes, unmatchedNewAnnotations);
-  const reExtracted = await extractPdfAnnotations(recoloredBytes);
-  assert.deepEqual(reExtracted[0].color, [1, 1, 0]); // Matched voice clip stays yellow
-  assert.deepEqual(reExtracted[1].color, [0, 1, 0]); // Unmatched memorization highlight becomes green
+  const recoloredBytes = await prepareCorrectionPdfForRendering(origBytes, unmatchedNewAnnotations, [1, 2]);
+  const recolored = await PDFDocument.load(recoloredBytes);
+  const reExtracted = await extractPdfAnnotations(recolored);
+  assert.deepEqual(reExtracted[0].color, [1, 0.756866, 0]);
+  assert.deepEqual(reExtracted[1].color, [0, 1, 0]);
+  assert.deepEqual((await extractPdfAnnotations(origBytes)).map(a => a.color), [[1, 0.756866, 0], [1, 0.756866, 0]]);
+
+  for (const [pageIndex, color] of [[0, '1 .756866 0'], [1, '0 1 0']]) {
+    const normal = recolored.getPage(pageIndex).node.lookup(PDFName.of('Annots')).lookup(0)
+      .lookup(PDFName.of('AP')).lookup(PDFName.of('N'));
+    const stroke = normal.dict.lookup(PDFName.of('Resources')).lookup(PDFName.of('XObject')).lookup(PDFName.of('Stroke'));
+    assert.equal(Buffer.from(decodePDFRawStream(stroke).decode()).toString(), color + ' RG\n24 w\n10 10 m 50 10 l S');
+  }
 
   const merged = mergeReportAndAudioSections({ reportSections: [], markers, unmatchedNewAnnotations });
   assert.deepEqual(merged.allPdfPages, [1, 2]);
+});
+
+test('stationary yellow ink gets a filled marker without changing moving strokes or circle annotations', async () => {
+  const doc = await PDFDocument.create();
+  const page = doc.addPage();
+  const outline = doc.context.register(doc.context.flateStream('1 .75 0 RG\n30 w\nS'));
+  const makeMark = (subtype, points) => ({
+    Type: 'Annot',
+    Subtype: subtype,
+    Rect: [0, 0, 60, 60],
+    C: [1, 0.75, 0],
+    CA: 0.5,
+    BS: { W: 30 },
+    InkList: [points],
+    AP: { N: outline },
+  });
+  page.node.set(PDFName.of('Annots'), doc.context.obj([
+    makeMark('Ink', [30, 30, 30, 30]),
+    makeMark('Ink', [30, 30, 30, 31]),
+    makeMark('Circle', [30, 30, 30, 30]),
+  ]));
+
+  const original = await doc.save();
+  const rendered = await PDFDocument.load(await prepareCorrectionPdfForRendering(original, [], [1]));
+  const annots = rendered.getPage(0).node.lookup(PDFName.of('Annots'));
+  const appearance = index => annots.lookup(index).lookup(PDFName.of('AP')).lookup(PDFName.of('N'));
+  const draw = index => Buffer.from(decodePDFRawStream(appearance(index)).decode()).toString();
+  assert.match(draw(0), /^1 0\.75 0 rg$/m);
+  assert.match(draw(0), /^f$/m);
+  assert.doesNotMatch(draw(0), /^S$/m);
+  const state = appearance(0).dict.lookup(PDFName.of('Resources')).lookup(PDFName.of('ExtGState')).lookup(PDFName.of('Marker'));
+  assert.equal(state.lookup(PDFName.of('ca')).asNumber(), 0.5);
+  assert.equal(String(state.lookup(PDFName.of('BM'))), '/Multiply');
+  assert.equal(draw(1), '1 .75 0 RG\n30 w\nS');
+  assert.equal(draw(2), draw(1));
+  assert.deepEqual((await extractPdfAnnotations(rendered)).map(a => a.color), Array(3).fill([1, 0.75, 0]));
+  assert.equal(await prepareCorrectionPdfForRendering(original, [], []), original);
 });
 
 test('findSessionForStudent falls back across day transition or today when calendar date differs from recording date', () => {
