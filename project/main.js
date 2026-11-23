@@ -927,7 +927,7 @@ ipcMain.handle('session:match-annotations', async (_event, { sessionKey, sourceP
     }
     try {
         if (autoSave) {
-            await store.triggerAutoSavePdfViewer(pdfPath, session.lastRecordedAt);
+            await triggerAutoSavePdfViewer(pdfPath, session.lastRecordedAt);
         }
         const readablePdfPath = store.resolveLatestPdfCopyForReading(pdfPath);
         const bytes = fs.readFileSync(readablePdfPath);
@@ -1009,7 +1009,7 @@ ipcMain.handle('session:export', async (_event, { sessionKey, sourcePdfPath, mod
     }
 
     if (autoSave) {
-        await store.triggerAutoSavePdfViewer(pdfPath, session.lastRecordedAt);
+        await triggerAutoSavePdfViewer(pdfPath, session.lastRecordedAt);
     }
     const readablePdfPath = store.resolveLatestPdfCopyForReading(pdfPath);
     const rawPdfBytes = fs.readFileSync(readablePdfPath);
