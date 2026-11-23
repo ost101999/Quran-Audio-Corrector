@@ -27,6 +27,8 @@ contextBridge.exposeInMainWorld('correctorAPI', {
     nativeEdit: (action) => ipcRenderer.invoke('hud:native-edit', action),
     checkForUpdates: () => ipcRenderer.invoke('app-update:check'),
     startUpdate: () => ipcRenderer.invoke('app-update:start'),
+    devModeStatus: () => ipcRenderer.invoke('dev-mode:status'),
+    devModeToggle: () => ipcRenderer.invoke('dev-mode:toggle'),
     onShortcut: (cb) => {
         const handler = (_event, action) => cb(action);
         ipcRenderer.on('hud-shortcut', handler);

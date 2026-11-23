@@ -1,5 +1,6 @@
 const { app, BrowserWindow, ipcMain, globalShortcut, screen, clipboard, shell, dialog, Tray, Menu, nativeImage } = require('electron');
 const { registerAppUpdates } = require('./core/app-update');
+const { registerDevMode } = require('./core/dev-mode');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
@@ -41,6 +42,8 @@ const {
 
 let mainWindow = null;
 let tray = null;
+let devModeController = null;
+const loadLiveCore = (relPath) => devModeController ? devModeController.requireModule(relPath) : require(relPath);
 let isQuitting = false;
 let lastKnownDetectedPdf = '';
 let preReviewBounds = null;
@@ -491,7 +494,7 @@ function createWindow() {
         }
     });
 
-    const devUrl = process.env.VITE_DEV_SERVER_URL;
+    const devUrl = devModeController?.getOverrideStartUrl?.() || process.env.VITE_DEV_SERVER_URL;
     if (devUrl) {
         mainWindow.loadURL(devUrl);
     } else {
@@ -547,10 +550,23 @@ function toggleHudVisibility() {
 
 function buildHudMenu() {
     const visible = Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible());
+    const devStatus = devModeController?.getStatus?.();
+    const devItems = devStatus?.available
+        ? [
+            { type: 'separator' },
+            {
+                label: devStatus.active
+                    ? (devStatus.mainOutdated ? 'تحديث محرك التشغيل (وضع المطور)' : 'العودة للنسخة المثبتة')
+                    : 'تشغيل وضع المطور (بدون بناء)',
+                click: () => { void devModeController.toggleDevMode(); },
+            },
+        ]
+        : [];
     return Menu.buildFromTemplate([
         visible
             ? { label: 'إخفاء بجانب الساعة', click: () => hideHudWindow() }
             : { label: 'إظهار المصحح الصوتي', click: () => showHudWindow() },
+        ...devItems,
         { type: 'separator' },
         {
             label: 'إغلاق المصحح الصوتي',
@@ -671,9 +687,17 @@ if (!gotSingleInstanceLock) {
     app.on('second-instance', () => {
         showHudWindow();
     });
-    app.whenReady().then(() => {
+    app.whenReady().then(async () => {
         fs.mkdirSync(SESSIONS_ROOT_DIR, { recursive: true });
         try { fs.writeFileSync(HUD_PID_PATH, String(process.pid), 'utf8'); } catch { /* ignore */ }
+        devModeController = registerDevMode({
+            app,
+            ipcMain,
+            dialog,
+            getMainWindow: () => mainWindow,
+            onStatusChange: updateTrayMenu,
+        });
+        await devModeController.prepareFullDevUrl();
         createMacAppMenu();
         createWindow();
         createTray();
@@ -833,11 +857,12 @@ ipcMain.handle('hud:save-mic', (_event, payload) => {
 });
 
 ipcMain.handle('hud:list-students', () => {
-    const students = getQuranTrackerStudents();
-    const shortcuts = readShortcutMushafs();
+    const store = loadLiveCore('./core/session-store');
+    const students = store.getQuranTrackerStudents();
+    const shortcuts = store.readShortcutMushafs();
     return students.map(s => {
-        const normStudent = normalizeText(s.name);
-        const foundShortcut = shortcuts.find(sc => normalizeText(sc.parentFolder) === normStudent);
+        const normStudent = store.normalizeText(s.name);
+        const foundShortcut = shortcuts.find(sc => store.normalizeText(sc.parentFolder) === normStudent);
         return {
             id: s.id,
             name: s.name,
@@ -850,22 +875,24 @@ ipcMain.handle('hud:list-students', () => {
 ipcMain.handle('hud:detect-active-student', async () => {
     const detected = await detectActivePdfApp();
     if (!detected) return { detected: null };
-    const match = matchWindowTitleToStudent(detected.title, detected.filePath);
+    const store = loadLiveCore('./core/session-store');
+    const match = store.matchWindowTitleToStudent(detected.title, detected.filePath);
     if (match?.sourcePdfPath) lastKnownDetectedPdf = match.sourcePdfPath;
     return { detected: match, foreground: detected.foreground, rawTitle: detected.title };
 });
 
 ipcMain.handle('session:load-or-create', (_event, payload) => {
-    return loadOrCreateSession({
+    const store = loadLiveCore('./core/session-store');
+    return store.loadOrCreateSession({
         studentId: payload?.studentId || '',
         studentName: payload?.studentName || 'طالب بدون اسم',
         sourcePdfPath: payload?.sourcePdfPath || lastKnownDetectedPdf || '',
-        dateStr: payload?.dateStr || getTodayDateStr(),
+        dateStr: payload?.dateStr || store.getTodayDateStr(),
     });
 });
 
 ipcMain.handle('session:add-clip', (_event, { sessionKey, audioBytes, ext, startedAt, endedAt, durationMs }) => {
-    return addAudioClipToSession(sessionKey, {
+    return loadLiveCore('./core/session-store').addAudioClipToSession(sessionKey, {
         buffer: Buffer.from(audioBytes),
         ext: ext || 'mp3',
         startedAt,
@@ -875,38 +902,40 @@ ipcMain.handle('session:add-clip', (_event, { sessionKey, audioBytes, ext, start
 });
 
 ipcMain.handle('session:remove-clip', (_event, { sessionKey, clipId }) => {
-    return removeClipFromSession(sessionKey, clipId || null);
+    return loadLiveCore('./core/session-store').removeClipFromSession(sessionKey, clipId || null);
 });
 
 ipcMain.handle('session:redo-clip', (_event, { sessionKey }) => {
-    return redoClipInSession(sessionKey);
+    return loadLiveCore('./core/session-store').redoClipInSession(sessionKey);
 });
 
 ipcMain.handle('session:update-pin', (_event, { sessionKey, clipId, pdfPage, xPercent, yPercent }) => {
-    return updateClipManualPin(sessionKey, clipId, { pdfPage, xPercent, yPercent });
+    return loadLiveCore('./core/session-store').updateClipManualPin(sessionKey, clipId, { pdfPage, xPercent, yPercent });
 });
 
 ipcMain.handle('session:match-annotations', async (_event, { sessionKey, sourcePdfPath, autoSave }) => {
-    const session = (sessionKey ? loadSession(sessionKey) : null) || loadOrCreateSession({});
+    const store = loadLiveCore('./core/session-store');
+    const matcher = loadLiveCore('./core/annotation-matcher');
+    const session = (sessionKey ? store.loadSession(sessionKey) : null) || store.loadOrCreateSession({});
     const pdfPath = sourcePdfPath || session.sourcePdfPath;
     if (!pdfPath || !fs.existsSync(pdfPath)) {
         return { success: false, error: 'لم يتم العثور على ملف PDF مصحف الطالب.', markers: [], unmatchedClips: session.clips || [] };
     }
     if (pdfPath && session.sourcePdfPath !== pdfPath) {
         session.sourcePdfPath = pdfPath;
-        saveSession(session);
+        store.saveSession(session);
     }
     try {
         if (autoSave) {
-            await triggerAutoSavePdfViewer(pdfPath, session.lastRecordedAt);
+            await store.triggerAutoSavePdfViewer(pdfPath, session.lastRecordedAt);
         }
-        const readablePdfPath = resolveLatestPdfCopyForReading(pdfPath);
+        const readablePdfPath = store.resolveLatestPdfCopyForReading(pdfPath);
         const bytes = fs.readFileSync(readablePdfPath);
-        const annotations = await extractPdfAnnotations(bytes);
-        const { markers, unmatchedClips, unmatchedNewAnnotations } = matchClipsToAnnotations(session.clips || [], annotations, {
+        const annotations = await matcher.extractPdfAnnotations(bytes);
+        const { markers, unmatchedClips, unmatchedNewAnnotations } = matcher.matchClipsToAnnotations(session.clips || [], annotations, {
             sessionStartedAt: session.startedAt || 0,
         });
-        const { sections, allPdfPages } = mergeReportAndAudioSections({
+        const { sections, allPdfPages } = matcher.mergeReportAndAudioSections({
             reportSections: [],
             markers,
             unmatchedNewAnnotations,
@@ -946,11 +975,13 @@ ipcMain.handle('session:match-annotations', async (_event, { sessionKey, sourceP
 
 ipcMain.handle('session:render-pages', async (_event, { sourcePdfPath, pageNumbers, scale, recolorAnnotations }) => {
     try {
+        const matcher = loadLiveCore('./core/annotation-matcher');
+        const pub = loadLiveCore('./core/publisher');
         let pdfBytes = null;
         if (Array.isArray(recolorAnnotations) && recolorAnnotations.length > 0 && sourcePdfPath && fs.existsSync(sourcePdfPath)) {
-            pdfBytes = await recolorAnnotationsToGreenInPdfBytes(fs.readFileSync(sourcePdfPath), recolorAnnotations);
+            pdfBytes = await matcher.recolorAnnotationsToGreenInPdfBytes(fs.readFileSync(sourcePdfPath), recolorAnnotations);
         }
-        const images = await renderPdfPagesToImages({
+        const images = await pub.renderPdfPagesToImages({
             BrowserWindow,
             pdfPath: sourcePdfPath,
             pdfBytes,
@@ -964,23 +995,26 @@ ipcMain.handle('session:render-pages', async (_event, { sourcePdfPath, pageNumbe
 });
 
 ipcMain.handle('session:clip-data-url', (_event, { sessionKey, fileName }) => {
-    return readClipAudioDataUrl(sessionKey, fileName);
+    return loadLiveCore('./core/session-store').readClipAudioDataUrl(sessionKey, fileName);
 });
 
 ipcMain.handle('session:export', async (_event, { sessionKey, sourcePdfPath, mode, language = 'ar', autoSave = true }) => {
-    const session = (sessionKey ? loadSession(sessionKey) : null) || loadOrCreateSession({});
+    const store = loadLiveCore('./core/session-store');
+    const matcher = loadLiveCore('./core/annotation-matcher');
+    const pub = loadLiveCore('./core/publisher');
+    const session = (sessionKey ? store.loadSession(sessionKey) : null) || store.loadOrCreateSession({});
     const pdfPath = sourcePdfPath || session.sourcePdfPath;
     if (!pdfPath || !fs.existsSync(pdfPath)) {
         return { success: false, error: 'ملف PDF الخاص بالطالب غير محدد أو غير موجود.' };
     }
 
     if (autoSave) {
-        await triggerAutoSavePdfViewer(pdfPath, session.lastRecordedAt);
+        await store.triggerAutoSavePdfViewer(pdfPath, session.lastRecordedAt);
     }
-    const readablePdfPath = resolveLatestPdfCopyForReading(pdfPath);
+    const readablePdfPath = store.resolveLatestPdfCopyForReading(pdfPath);
     const rawPdfBytes = fs.readFileSync(readablePdfPath);
-    const annotations = await extractPdfAnnotations(rawPdfBytes);
-    const { markers, unmatchedClips, unmatchedNewAnnotations } = matchClipsToAnnotations(session.clips || [], annotations, {
+    const annotations = await matcher.extractPdfAnnotations(rawPdfBytes);
+    const { markers, unmatchedClips, unmatchedNewAnnotations } = matcher.matchClipsToAnnotations(session.clips || [], annotations, {
         sessionStartedAt: session.startedAt || 0,
     });
 
@@ -997,13 +1031,13 @@ ipcMain.handle('session:export', async (_event, { sessionKey, sourcePdfPath, mod
         };
     }
 
-    const { sections, allPdfPages } = mergeReportAndAudioSections({
+    const { sections, allPdfPages } = matcher.mergeReportAndAudioSections({
         reportSections: [],
         markers,
         unmatchedNewAnnotations,
     });
-    const recoloredBytes = await recolorAnnotationsToGreenInPdfBytes(rawPdfBytes, unmatchedNewAnnotations);
-    const renderedImages = await renderPdfPagesToImages({
+    const recoloredBytes = await matcher.recolorAnnotationsToGreenInPdfBytes(rawPdfBytes, unmatchedNewAnnotations);
+    const renderedImages = await pub.renderPdfPagesToImages({
         BrowserWindow,
         pdfPath: readablePdfPath,
         pdfBytes: recoloredBytes,
@@ -1021,19 +1055,19 @@ ipcMain.handle('session:export', async (_event, { sessionKey, sourcePdfPath, mod
                 xPercent: m.xPercent,
                 yPercent: m.yPercent,
                 durationMs: m.durationMs || 0,
-                audioDataUrl: readClipAudioDataUrl(sessionKey, m.audioFileName),
+                audioDataUrl: store.readClipAudioDataUrl(sessionKey, m.audioFileName),
             })),
         })),
     }));
 
     if (mode === 'html') {
-        const html = buildInteractiveHtml({
+        const html = pub.buildInteractiveHtml({
             studentName: session.studentName,
             dateStr: session.dateStr,
             language,
             sections: enrichedSections,
         });
-        const saved = saveInteractiveHtmlFile({
+        const saved = pub.saveInteractiveHtmlFile({
             outputDir: OUTPUT_HTML_DIR,
             studentName: session.studentName,
             dateStr: session.dateStr,
@@ -1050,7 +1084,7 @@ ipcMain.handle('session:export', async (_event, { sessionKey, sourcePdfPath, mod
         };
     }
 
-    const published = await publishAudioSessionToCloud({
+    const published = await pub.publishAudioSessionToCloud({
         studentId: session.studentId || '',
         studentName: session.studentName,
         dateStr: session.dateStr,

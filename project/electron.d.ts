@@ -30,6 +30,8 @@ declare global {
       nativeEdit: (action: 'undo' | 'redo') => Promise<{ ok: boolean }>;
       checkForUpdates: () => Promise<{ status: 'available' | 'up-to-date' | 'error'; current?: string; latest?: string; error?: string }>;
       startUpdate: () => Promise<{ started: boolean }>;
+      devModeStatus?: () => Promise<{ available: boolean; active: boolean; fullSource?: boolean; mainOutdated?: boolean }>;
+      devModeToggle?: () => Promise<{ ok: boolean; canceled?: boolean; error?: string; relaunching?: boolean }>;
       onShortcut: (cb: (action: 'toggle-record' | 'undo-last' | 'redo-last' | 'finish-export') => void) => () => void;
       onEditAction: (cb: (action: 'undo' | 'redo') => void) => () => void;
     };

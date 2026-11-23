@@ -4,6 +4,7 @@ import {
   Bell,
   Check,
   ChevronDown,
+  Code2,
   Eye,
   FileCode2,
   FolderOpen,
@@ -70,6 +71,8 @@ export default function App() {
   const [updateInfo, setUpdateInfo] = useState<{ status: 'available' | 'up-to-date' | 'error'; current?: string; latest?: string } | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [startingUpdate, setStartingUpdate] = useState(false);
+  const [devStatus, setDevStatus] = useState<{ available: boolean; active: boolean; fullSource?: boolean; mainOutdated?: boolean } | null>(null);
+  const [togglingDev, setTogglingDev] = useState(false);
 
   // Review state
   const [matchData, setMatchData] = useState<{
@@ -186,11 +189,19 @@ export default function App() {
   // Load students list, check updates on boot, and re-check silently every 30 minutes
   useEffect(() => {
     window.correctorAPI?.listStudents().then(setStudents).catch(() => {});
+    const refreshDevStatus = () => {
+      void window.correctorAPI?.devModeStatus?.().then(setDevStatus).catch(() => {});
+    };
+    refreshDevStatus();
+    window.addEventListener('focus', refreshDevStatus);
     void checkAppUpdates(false);
     const timer = window.setInterval(() => {
       void checkAppUpdates(true);
     }, 30 * 60 * 1000);
-    return () => window.clearInterval(timer);
+    return () => {
+      window.removeEventListener('focus', refreshDevStatus);
+      window.clearInterval(timer);
+    };
   }, [checkAppUpdates]);
 
   // Ensure a session exists whenever selectedStudent changes
@@ -979,6 +990,50 @@ export default function App() {
                 <span className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-amber-400 ring-2 ring-slate-900 animate-pulse" />
               )}
             </button>
+            {devStatus?.available && (
+              <button
+                type="button"
+                disabled={togglingDev}
+                onClick={async () => {
+                  if (togglingDev || !window.correctorAPI?.devModeToggle) return;
+                  setTogglingDev(true);
+                  setShowMicMenu(false);
+                  setShowUpdateMenu(false);
+                  try {
+                    const res = await window.correctorAPI.devModeToggle();
+                    if (!res?.ok && !res?.canceled) {
+                      flashStatus(res?.error || 'تعذر تشغيل وضع التطوير.');
+                    } else if (!res?.relaunching) {
+                      const next = await window.correctorAPI.devModeStatus?.();
+                      if (next) setDevStatus(next);
+                    }
+                  } catch {
+                    flashStatus('تعذر تشغيل وضع التطوير.');
+                  } finally {
+                    setTogglingDev(false);
+                  }
+                }}
+                className={`relative p-1.5 rounded-lg transition-colors disabled:opacity-60 ${
+                  devStatus.active ? 'bg-indigo-500/30 text-indigo-200' : 'hover:bg-white/10 text-slate-400 hover:text-white'
+                }`}
+                title={
+                  devStatus.active
+                    ? devStatus.mainOutdated
+                      ? 'تحديث محرك التشغيل بالكود الجديد بدون بناء'
+                      : 'وضع المطور نشط — اضغط للعودة للنسخة المثبتة'
+                    : 'تشغيل وضع المطور (بدون بناء)'
+                }
+              >
+                {togglingDev
+                  ? <Loader2 size={13} className="animate-spin text-indigo-300" />
+                  : devStatus.active && devStatus.mainOutdated
+                  ? <RefreshCw size={13} className="text-amber-300" />
+                  : <Code2 size={13} />}
+                {devStatus.active && devStatus.mainOutdated && !togglingDev && (
+                  <span className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-amber-400 ring-2 ring-slate-900 animate-pulse" />
+                )}
+              </button>
+            )}
             <button
               type="button"
               onClick={() => void window.correctorAPI?.openOutputFolder()}
